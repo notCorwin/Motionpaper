@@ -1,0 +1,32 @@
+name: Build and test
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Test playback ownership and cancellation
+        run: swift test --parallel
+      - name: Build the menu bar app
+        run: sh scripts/build-app.sh release
+      - name: Package the app
+        run: ditto -c -k --keepParent dist/Wavepaper.app dist/Wavepaper.zip
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: Wavepaper
+          path: dist/Wavepaper.zip
+          if-no-files-found: error

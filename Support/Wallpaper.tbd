@@ -1,0 +1,10 @@
+--- !tapi-tbd
+tbd-version: 4
+targets: [ arm64-macos ]
+install-name: '/System/Library/PrivateFrameworks/Wallpaper.framework/Versions/A/Wallpaper'
+exports:
+  - targets: [ arm64-macos ]
+    symbols:
+      - '_$s9Wallpaper0A25PresentationModeAssertionC08takeIdleD0ACXDyYaKFZ'
+      - '_$s9Wallpaper0A25PresentationModeAssertionC08takeIdleD0ACXDyYaKFZTu'
+...
