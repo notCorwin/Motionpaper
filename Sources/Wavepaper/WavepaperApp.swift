@@ -6,19 +6,7 @@ import PlaybackCore
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let playback = PlaybackController { try await NativeWallpaperSession.acquire() }
     let statusItem = StatusItemController()
-    private let preferences: UserDefaults
     private let logger = Logger(subsystem: "local.wavepaper.app", category: "playback")
-
-    override init() {
-        #if DEBUG
-        preferences = CommandLine.arguments.contains("--verify-ui")
-            ? UserDefaults(suiteName: "local.wavepaper.verification")! : .standard
-        #else
-        preferences = .standard
-        #endif
-        preferences.register(defaults: ["playbackEnabled": true])
-        super.init()
-    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         playback.onStateChange = { [weak self] state in
@@ -26,23 +14,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.statusItem.update(state)
             self.logger.info("Playback state: \(String(describing: state), privacy: .public)")
         }
-        statusItem.onToggle = { [weak self] in
-            guard let self else { return }
-            let enabled = self.playback.state != .enabled
-            self.preferences.set(enabled, forKey: "playbackEnabled")
-            self.playback.setEnabled(enabled)
-        }
+        playback.setEnabled(true)
         #if DEBUG
         if CommandLine.arguments.contains("--verify-ui") {
             Task { await verifyUI() }
-            return
         }
         #endif
-        playback.setEnabled(preferences.bool(forKey: "playbackEnabled"))
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         playback.setEnabled(false)
+        #if DEBUG
+        if CommandLine.arguments.contains("--verify-ui") {
+            verifyTermination()
+        }
+        #endif
     }
 }
 

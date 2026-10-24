@@ -36,7 +36,7 @@ final class NativeWallpaperSession: PlaybackSession {
     }
 
     // OS build and loaded-image metadata are immutable within this process.
-    // Resolve them once; only the assertion itself changes when playback toggles.
+    // Resolve them once and retain the assertion until the app quits.
     private static let nativeClass: Result<NativeAssertion.Type, any Error> = Result {
         let build = try systemBuild()
         guard build == "24H32" else { throw NativeWallpaperError.unsupportedBuild(build) }

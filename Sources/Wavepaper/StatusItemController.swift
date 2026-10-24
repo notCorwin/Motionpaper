@@ -3,13 +3,11 @@ import PlaybackCore
 import QuartzCore
 
 @MainActor
-final class StatusItemController: NSObject, NSMenuDelegate {
+final class StatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let symbolView = StatusSymbolView()
     let menu = NSMenu()
-    let playbackItem = NSMenuItem(title: "启用播放", action: nil, keyEquivalent: "")
     private let errorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    var onToggle: (() -> Void)?
 
     override init() {
         super.init()
@@ -26,14 +24,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             symbolView.widthAnchor.constraint(equalToConstant: 20),
             symbolView.heightAnchor.constraint(equalToConstant: 18),
         ])
-        playbackItem.target = self
-        playbackItem.action = #selector(togglePlayback)
         errorItem.isEnabled = false
         errorItem.isHidden = true
         menu.autoenablesItems = false
-        menu.addItem(playbackItem)
         menu.addItem(errorItem)
-        menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出 Wavepaper", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
@@ -44,19 +38,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     func update(_ state: PlaybackController.State) {
         let enabled = state == .enabled
         symbolView.setPlaybackEnabled(enabled)
-        playbackItem.state = enabled ? .on : .off
-        playbackItem.isEnabled = state != .starting
-        playbackItem.title = state == .starting ? "正在启用…" : "启用播放"
         errorItem.isHidden = true
 
         let description: String
         switch state {
-        case .disabled: description = "Wavepaper：播放已禁用"
-        case .starting: description = "Wavepaper：正在启用播放"
-        case .enabled: description = "Wavepaper：播放已启用"
+        case .disabled: description = "Wavepaper：播放已停止"
+        case .starting: description = "Wavepaper：正在开始播放"
+        case .enabled: description = "Wavepaper：正在播放"
         case .failed(let message):
-            description = "Wavepaper：无法启用播放"
-            errorItem.title = "无法启用播放，请重试"
+            description = "Wavepaper：无法开始播放"
+            errorItem.title = "无法开始播放，请退出后重新打开"
             errorItem.toolTip = message
             errorItem.isHidden = false
         }
@@ -64,8 +55,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusItem.button?.setAccessibilityLabel(description)
         symbolView.setAccessibilityLabel(description)
     }
-
-    @objc private func togglePlayback() { onToggle?() }
 }
 
 @MainActor
