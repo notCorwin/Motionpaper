@@ -24,7 +24,7 @@ public struct UpdateManifest: Codable, Equatable, Sendable {
               manifest.size > 0 else { throw UpdateError.invalidManifest }
 
         // Bind downloads to the same repository and immutable commit as the feed.
-        let expected = "https://github.com/\(components[1])/\(components[2])/releases/download/Autobuild-\(manifest.commit)/Wavepaper-\(manifest.shortCommit).dmg"
+        let expected = "https://github.com/\(components[1])/\(components[2])/releases/download/Autobuild-\(manifest.commit)/Motionpaper-\(manifest.shortCommit).dmg"
         guard manifest.downloadURL.absoluteString == expected else { throw UpdateError.invalidManifest }
         return manifest
     }

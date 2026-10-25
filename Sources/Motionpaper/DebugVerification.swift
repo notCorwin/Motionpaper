@@ -5,7 +5,7 @@ import UpdateCore
 
 extension AppDelegate {
     private var verificationOutput: URL {
-        URL(fileURLWithPath: ProcessInfo.processInfo.environment["WAVEPAPER_VERIFICATION_DIRECTORY"] ?? "/tmp/wavepaper-verification")
+        URL(fileURLWithPath: ProcessInfo.processInfo.environment["MOTIONPAPER_VERIFICATION_DIRECTORY"] ?? "/tmp/motionpaper-verification")
     }
 
     @MainActor
@@ -20,7 +20,7 @@ extension AppDelegate {
             observations["hasCheckedMenuItem"] = statusItem.menu.items.contains { $0.state != .off }
             observations["iconEnabled"] = statusItem.symbolView.playbackEnabled
             observations["iconOpacity"] = statusItem.symbolView.alphaValue
-            observations["waveOpacities"] = statusItem.symbolView.currentWaveOpacities
+            observations["ribbonOpacity"] = statusItem.symbolView.currentRibbonOpacity
             observations["timestamp"] = Date().timeIntervalSince1970
             observations["menuBarWindowTitle"] = statusItem.symbolView.window?.title
             let data = try JSONSerialization.data(withJSONObject: observations, options: [.prettyPrinted, .sortedKeys])
@@ -32,7 +32,7 @@ extension AppDelegate {
                 try await Task.sleep(for: .milliseconds(20))
             }
             guard playback.state == .enabled else {
-                throw NSError(domain: "WavepaperVerification", code: 1, userInfo: [NSLocalizedDescriptionKey: "Native playback did not become enabled"])
+                throw NSError(domain: "MotionpaperVerification", code: 1, userInfo: [NSLocalizedDescriptionKey: "Native playback did not become enabled"])
             }
         }
         func snapshot(_ name: String) throws {
@@ -53,12 +53,12 @@ extension AppDelegate {
                 .compactMap { $0[kCGWindowName as String] as? String }
             observations["windowTitles"] = titles
             let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
-            guard visibleItems.filter({ !$0.isSeparatorItem }).map(\.title) == ["检查更新…", "退出 Wavepaper"],
+            guard visibleItems.filter({ !$0.isSeparatorItem }).map(\.title) == ["检查更新…", "退出 Motionpaper"],
                   visibleItems.allSatisfy({ $0.state == .off }),
                   statusItem.symbolView.playbackEnabled,
                   titles.contains(StatusItemController.identifier),
                   let quit = visibleItems.last else {
-                throw NSError(domain: "WavepaperVerification", code: 2, userInfo: [NSLocalizedDescriptionKey: "Expected automatic playback, update/quit actions, and stable CGWindow identity"])
+                throw NSError(domain: "MotionpaperVerification", code: 2, userInfo: [NSLocalizedDescriptionKey: "Expected automatic playback, update/quit actions, and stable CGWindow identity"])
             }
             try verifyUpdateMenu()
             observations["updateMenuVerified"] = true
@@ -66,10 +66,18 @@ extension AppDelegate {
             var samples: [[String: Any]] = []
             for _ in 0..<16 {
                 samples.append(["time": Date().timeIntervalSince1970,
-                                "opacities": statusItem.symbolView.currentWaveOpacities])
+                                "opacity": statusItem.symbolView.currentRibbonOpacity])
                 try await Task.sleep(for: .milliseconds(150))
             }
             observations["animationSamples"] = samples
+            observations["reduceMotion"] = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                let opacities = samples.compactMap { $0["opacity"] as? Float }
+                guard let low = opacities.min(), let high = opacities.max(), high - low > 0.1 else {
+                    throw NSError(domain: "MotionpaperVerification", code: 4,
+                                  userInfo: [NSLocalizedDescriptionKey: "The ribbon playback animation is not running"])
+                }
+            }
             for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
                 statusItem.symbolView.appearance = NSAppearance(named: appearance)
                 try await Task.sleep(for: .milliseconds(200))
@@ -100,7 +108,7 @@ extension AppDelegate {
         statusItem.onDownloadUpdate = { downloads += 1 }
         func require(_ valid: Bool) throws {
             guard valid else {
-                throw NSError(domain: "WavepaperVerification", code: 3,
+                throw NSError(domain: "MotionpaperVerification", code: 3,
                               userInfo: [NSLocalizedDescriptionKey: "Update menu states or actions are incorrect"])
             }
         }
@@ -111,10 +119,10 @@ extension AppDelegate {
         let commit = String(repeating: "a", count: 40)
         let data = try JSONSerialization.data(withJSONObject: [
             "commit": commit, "publishedAt": "2026-10-25T00:00:00Z",
-            "downloadURL": "https://github.com/notCorwin/Wavepaper/releases/download/Autobuild-\(commit)/Wavepaper-aaaaaaaaaaaa.dmg",
+            "downloadURL": "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild-\(commit)/Motionpaper-aaaaaaaaaaaa.dmg",
             "sha256": String(repeating: "b", count: 64), "size": 1,
         ])
-        let manifest = try UpdateManifest.decode(data, manifestURL: URL(string: "https://github.com/notCorwin/Wavepaper/releases/latest/download/update.json")!)
+        let manifest = try UpdateManifest.decode(data, manifestURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/latest/download/update.json")!)
         statusItem.update(UpdateController.State.available(manifest))
         let downloadTitle = "下载更新（aaaaaaaaaaaa）…"
         try require(statusItem.menu.item(withTitle: downloadTitle)?.isHidden == false)

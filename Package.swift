@@ -5,14 +5,14 @@ import PackageDescription
 let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 
 let package = Package(
-    name: "Wavepaper",
+    name: "Motionpaper",
     platforms: [.macOS(.v15)],
-    products: [.executable(name: "Wavepaper", targets: ["Wavepaper"])],
+    products: [.executable(name: "Motionpaper", targets: ["Motionpaper"])],
     targets: [
         .target(name: "PlaybackCore"),
         .target(name: "UpdateCore"),
         .executableTarget(
-            name: "Wavepaper",
+            name: "Motionpaper",
             dependencies: ["PlaybackCore", "UpdateCore"],
             linkerSettings: [.unsafeFlags(["-Xlinker", "\(root)/Support/Wallpaper.tbd"])]
         ),

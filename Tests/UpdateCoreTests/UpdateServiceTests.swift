@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import UpdateCore
 
-private let feed = URL(string: "https://github.com/notCorwin/Wavepaper/releases/latest/download/update.json")!
+private let feed = URL(string: "https://github.com/notCorwin/Motionpaper/releases/latest/download/update.json")!
 private let commit = String(repeating: "a", count: 40)
 private let digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
@@ -10,7 +10,7 @@ private func manifestData(commit: String = commit, checksum: String = digest, si
                           download: String? = nil) throws -> Data {
     try JSONSerialization.data(withJSONObject: [
         "commit": commit, "publishedAt": "2026-10-25T00:00:00Z",
-        "downloadURL": download ?? "https://github.com/notCorwin/Wavepaper/releases/download/Autobuild-\(commit)/Wavepaper-\(commit.prefix(12)).dmg",
+        "downloadURL": download ?? "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild-\(commit)/Motionpaper-\(commit.prefix(12)).dmg",
         "sha256": checksum, "size": size,
     ])
 }
@@ -21,10 +21,10 @@ private func manifestData(commit: String = commit, checksum: String = digest, si
     #expect(manifest.shortCommit == "aaaaaaaaaaaa")
     #expect(manifest.size == 3)
     for address in [
-        "https://example.com/Wavepaper.dmg",
-        "https://github.com/another/Wavepaper/releases/download/Autobuild-\(commit)/Wavepaper-aaaaaaaaaaaa.dmg",
-        "https://github.com/notCorwin/Wavepaper/releases/latest/download/Wavepaper-aaaaaaaaaaaa.dmg",
-        "https://github.com/notCorwin/Wavepaper/releases/download/Autobuild-\(commit)/Wavepaper-aaaaaaaaaaaa.dmg?redirect=1",
+        "https://example.com/Motionpaper.dmg",
+        "https://github.com/another/Motionpaper/releases/download/Autobuild-\(commit)/Motionpaper-aaaaaaaaaaaa.dmg",
+        "https://github.com/notCorwin/Motionpaper/releases/latest/download/Motionpaper-aaaaaaaaaaaa.dmg",
+        "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild-\(commit)/Motionpaper-aaaaaaaaaaaa.dmg?redirect=1",
     ] {
         #expect(throws: (any Error).self) { try UpdateManifest.decode(manifestData(download: address), manifestURL: feed) }
     }

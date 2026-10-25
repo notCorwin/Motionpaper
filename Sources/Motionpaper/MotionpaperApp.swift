@@ -7,7 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let playback = PlaybackController { try await NativeWallpaperSession.acquire() }
     let statusItem = StatusItemController()
     let updates = UpdateController()
-    private let logger = Logger(subsystem: "local.wavepaper.app", category: "playback")
+    private let logger = Logger(subsystem: "local.motionpaper.app", category: "playback")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem.onCheckForUpdates = { [weak self] in self?.updates.checkForUpdates() }
@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-enum WavepaperApp {
+enum MotionpaperApp {
     @MainActor
     static func main() {
         let application = NSApplication.shared

@@ -36,7 +36,7 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: .build
-          key: ${{ runner.os }}-arm64-swift-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Tests/**', 'Support/Wallpaper.tbd', 'Tools/GenerateIcon.swift') }}
+          key: ${{ runner.os }}-arm64-swift-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Tests/**', 'Support/Wallpaper.tbd', 'Tools/GenerateIcon.swift', 'assets/AppIcon.png') }}
           restore-keys: |
             ${{ runner.os }}-arm64-swift-${{ steps.swift.outputs.version }}-
 
@@ -71,8 +71,8 @@ jobs:
       - uses: actions/upload-artifact@v7.0.2
         if: steps.target.outputs.should_release == 'true'
         with:
-          name: wavepaper-release-${{ steps.target.outputs.commit }}
-          path: dist/Wavepaper-${{ steps.target.outputs.short_commit }}.dmg
+          name: motionpaper-release-${{ steps.target.outputs.commit }}
+          path: dist/Motionpaper-${{ steps.target.outputs.short_commit }}.dmg
           if-no-files-found: error
           retention-days: 1
 
@@ -91,7 +91,7 @@ jobs:
 
       - uses: actions/download-artifact@v8.0.2
         with:
-          name: wavepaper-release-${{ needs.build.outputs.commit }}
+          name: motionpaper-release-${{ needs.build.outputs.commit }}
           path: dist
 
       - name: Publish release and remove obsolete commit releases

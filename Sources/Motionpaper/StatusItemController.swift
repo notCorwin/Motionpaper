@@ -4,7 +4,7 @@ import QuartzCore
 
 @MainActor
 final class StatusItemController: NSObject {
-    static let identifier = "Wavepaper.StatusItem"
+    static let identifier = "Motionpaper.StatusItem"
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let symbolView = StatusSymbolView()
     let menu = NSMenu()
@@ -37,7 +37,7 @@ final class StatusItemController: NSObject {
         menu.addItem(errorItem)
         updateItem.target = self
         updateItem.action = #selector(checkForUpdates)
-        if let commit = Bundle.main.object(forInfoDictionaryKey: "WavepaperCommit") as? String {
+        if let commit = Bundle.main.object(forInfoDictionaryKey: "MotionpaperCommit") as? String {
             updateItem.toolTip = "当前提交：\(commit.prefix(12))"
         }
         menu.addItem(updateItem)
@@ -46,7 +46,7 @@ final class StatusItemController: NSObject {
         downloadItem.isHidden = true
         menu.addItem(downloadItem)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出 Wavepaper", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "退出 Motionpaper", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
         statusItem.menu = menu
@@ -85,11 +85,11 @@ final class StatusItemController: NSObject {
 
         let description: String
         switch state {
-        case .disabled: description = "Wavepaper：播放已停止"
-        case .starting: description = "Wavepaper：正在开始播放"
-        case .enabled: description = "Wavepaper：正在播放"
+        case .disabled: description = "Motionpaper：播放已停止"
+        case .starting: description = "Motionpaper：正在开始播放"
+        case .enabled: description = "Motionpaper：正在播放"
         case .failed(let message):
-            description = "Wavepaper：无法开始播放"
+            description = "Motionpaper：无法开始播放"
             errorItem.title = "无法开始播放，请退出后重新打开"
             errorItem.toolTip = message
             errorItem.isHidden = false
@@ -103,31 +103,24 @@ final class StatusItemController: NSObject {
 @MainActor
 final class StatusSymbolView: NSView {
     private(set) var playbackEnabled = false
-    private let rows = (0..<3).map { _ in NSView() }
-    private let images = (0..<3).map { _ in NSImageView() }
+    private let imageView = NSImageView()
     private var hasRendered = false
-    private static let inactiveOpacity: Float = 0.35
-    private static let animationKey = "wavepaper.topToBottom"
+    private static let inactiveOpacity: CGFloat = 0.35
+    private static let animationKey = "motionpaper.flow"
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        // Keep the system glyph intact. Each clipped copy supplies exactly one row.
-        // VariableColor.reversing plays both ways, so use an explicit one-way order.
-        let symbol = NSImage(systemSymbolName: "water.waves", accessibilityDescription: nil)
-        for (row, image) in zip(rows, images) {
-            row.wantsLayer = true
-            row.clipsToBounds = true
-            row.layer?.masksToBounds = true
-            row.setAccessibilityElement(false)
-            image.image = symbol
-            image.symbolConfiguration = .init(pointSize: 16, weight: .medium)
-            image.imageScaling = .scaleProportionallyDown
-            image.contentTintColor = .labelColor
-            image.setAccessibilityElement(false)
-            row.addSubview(image)
-            addSubview(row)
+        guard let image = NSImage(named: "StatusIcon") else {
+            preconditionFailure("The Motionpaper status icon is missing from the app bundle")
         }
+        image.isTemplate = true
+        imageView.image = image
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.contentTintColor = .labelColor
+        imageView.wantsLayer = true
+        imageView.setAccessibilityElement(false)
+        addSubview(imageView)
         setPlaybackEnabled(false)
     }
 
@@ -139,12 +132,7 @@ final class StatusSymbolView: NSView {
 
     override func layout() {
         super.layout()
-        for index in rows.indices {
-            let height = bounds.height / 3
-            let y = CGFloat(2 - index) * height
-            rows[index].frame = NSRect(x: 0, y: y, width: bounds.width, height: height)
-            images[index].frame = NSRect(x: 0, y: -y, width: bounds.width, height: bounds.height)
-        }
+        imageView.frame = bounds
     }
 
     func setPlaybackEnabled(_ enabled: Bool) {
@@ -153,37 +141,22 @@ final class StatusSymbolView: NSView {
         playbackEnabled = enabled
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let start = CACurrentMediaTime()
-        for (index, row) in rows.enumerated() {
-            row.layer?.removeAnimation(forKey: Self.animationKey)
-            row.alphaValue = CGFloat(Self.inactiveOpacity)
-            guard enabled, let layer = row.layer else { continue }
-            let animation = CAKeyframeAnimation(keyPath: "opacity")
-            let dim = Self.inactiveOpacity
-            switch index {
-            case 0:
-                animation.keyTimes = [0, 0.23, 0.33, 0.90, 1]
-                animation.values = [1, 1, dim, dim, 1]
-            case 1:
-                animation.keyTimes = [0, 0.23, 0.33, 0.57, 0.67, 1]
-                animation.values = [dim, dim, 1, 1, dim, dim]
-            default:
-                animation.keyTimes = [0, 0.57, 0.67, 0.90, 1]
-                animation.values = [dim, dim, 1, 1, dim]
-            }
-            animation.duration = 0.9
-            animation.beginTime = layer.convertTime(start, from: nil)
-            animation.repeatCount = .infinity
-            animation.autoreverses = false
-            animation.calculationMode = .linear
-            layer.add(animation, forKey: Self.animationKey)
-        }
-        CATransaction.commit()
+        defer { CATransaction.commit() }
+        imageView.layer?.removeAnimation(forKey: Self.animationKey)
+        imageView.alphaValue = enabled ? 1 : Self.inactiveOpacity
+        guard enabled, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let animation = CAKeyframeAnimation(keyPath: "opacity")
+        animation.keyTimes = [0, 0.5, 1]
+        animation.values = [0.55, 1, 0.55]
+        animation.duration = 1.8
+        animation.repeatCount = .infinity
+        animation.calculationMode = .cubic
+        imageView.layer?.add(animation, forKey: Self.animationKey)
     }
 
     #if DEBUG
-    var currentWaveOpacities: [Float] {
-        rows.map { $0.layer?.presentation()?.opacity ?? $0.layer?.opacity ?? 0 }
+    var currentRibbonOpacity: Float {
+        imageView.layer?.presentation()?.opacity ?? imageView.layer?.opacity ?? 0
     }
     #endif
 }

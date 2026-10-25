@@ -19,16 +19,16 @@ final class UpdateController {
     private var availableUpdate: UpdateManifest?
     private var operation: Task<Void, Never>?
     private var automaticCheck: Task<Void, Never>?
-    private let logger = Logger(subsystem: "local.wavepaper.app", category: "updates")
+    private let logger = Logger(subsystem: "local.motionpaper.app", category: "updates")
 
     init() {
         let bundle = Bundle.main
-        if let commit = bundle.object(forInfoDictionaryKey: "WavepaperCommit") as? String,
-           let address = bundle.object(forInfoDictionaryKey: "WavepaperUpdateURL") as? String,
+        if let commit = bundle.object(forInfoDictionaryKey: "MotionpaperCommit") as? String,
+           let address = bundle.object(forInfoDictionaryKey: "MotionpaperUpdateURL") as? String,
            let url = URL(string: address),
            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
             service = UpdateService(manifestURL: url, currentCommit: commit,
-                                    directory: caches.appendingPathComponent("local.wavepaper.app/Updates", isDirectory: true))
+                                    directory: caches.appendingPathComponent("local.motionpaper.app/Updates", isDirectory: true))
         } else {
             service = nil
         }
@@ -89,7 +89,7 @@ final class UpdateController {
                             requestedDownload = manifest
                         }
                     } else {
-                        showAlert("已是最新提交", "当前 Wavepaper 与最新 Release 一致。")
+                        showAlert("已是最新提交", "当前 Motionpaper 与最新 Release 一致。")
                     }
                 }
             } catch {
@@ -117,7 +117,7 @@ final class UpdateController {
                     showAlert("无法打开安装镜像", "请重试，或从 GitHub Release 下载更新。")
                     return
                 }
-                showAlert("安装更新 \(manifest.shortCommit)", "请退出 Wavepaper，将镜像中的 Wavepaper 拖入 Applications 并替换，然后重新打开应用。")
+                showAlert("安装更新 \(manifest.shortCommit)", "请退出 Motionpaper，将镜像中的 Motionpaper 拖入 Applications 并替换，然后重新打开应用。")
             } catch {
                 guard !Task.isCancelled else { return }
                 showAlert("更新下载失败", error.localizedDescription)

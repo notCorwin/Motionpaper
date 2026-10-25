@@ -18,7 +18,7 @@ fi
 # GitHub rejects tags consisting solely of a full hexadecimal object ID.
 tag="Autobuild-$commit"
 short_commit=${commit:0:12}
-dmg_name="Wavepaper-$short_commit.dmg"
+dmg_name="Motionpaper-$short_commit.dmg"
 dmg_path="dist/$dmg_name"
 download_url="https://github.com/$repository/releases/download/$tag/$dmg_name"
 [[ -s $dmg_path ]] || { echo "error: release DMG not found: $dmg_path" >&2; exit 1; }
@@ -55,7 +55,7 @@ if [[ -s $work_dir/matching-releases.json ]]; then
     release_tag=$(jq -r '.tag_name' "$release_file")
     release_target=$(jq -r '.target_commitish' "$release_file")
     [[ $release_tag == "$tag" && $release_target == "$commit" ]] || {
-        echo "error: release tag $commit is not a commit-targeted Wavepaper release" >&2
+        echo "error: release tag $commit is not a commit-targeted Motionpaper release" >&2
         exit 1
     }
 fi
@@ -202,8 +202,8 @@ if ! is_current_default_head; then
     exit 0
 fi
 
-if [[ $repository != "notCorwin/Wavepaper" ]]; then
-    echo "Skipping obsolete release cleanup outside notCorwin/Wavepaper."
+if [[ $repository != "notCorwin/Motionpaper" ]]; then
+    echo "Skipping obsolete release cleanup outside notCorwin/Motionpaper."
     exit 0
 fi
 
