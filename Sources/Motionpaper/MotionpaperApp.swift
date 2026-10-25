@@ -9,8 +9,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let statusItem = StatusItemController()
     let updates = UpdateController()
     private let logger = Logger(subsystem: "local.motionpaper.app", category: "playback")
+    private var termination: Task<Void, Never>?
+    private var readyToTerminate = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        if CommandLine.arguments.contains("--verify-update-termination") {
+            verifyUpdateTermination()
+            return
+        }
+        #endif
         statusItem.onCheckForUpdates = { [weak self] in self?.updates.checkForUpdates() }
         statusItem.onInstallUpdate = { [weak self] in self?.updates.installAvailableUpdate() }
         updates.onStateChange = { [weak self] state in self?.statusItem.update(state) }
@@ -38,18 +46,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if readyToTerminate { return .terminateNow }
+        if termination != nil { return .terminateCancel }
         guard let cleanup = updates.stop() else { return .terminateNow }
-        Task {
+        termination = Task {
             await cleanup.value
-            sender.reply(toApplicationShouldTerminate: true)
+            readyToTerminate = true
+            sender.terminate(nil)
         }
-        return .terminateLater
+        // terminateLater runs a nested AppKit loop that can strand MainActor tasks
+        // when termination itself was requested by the update task.
+        return .terminateCancel
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         playback.setEnabled(false)
         #if DEBUG
-        if CommandLine.arguments.contains("--verify-ui") {
+        if CommandLine.arguments.contains("--verify-ui") || CommandLine.arguments.contains("--verify-update-termination") {
             verifyTermination()
         }
         #endif
@@ -61,16 +74,21 @@ enum MotionpaperApp {
     @MainActor
     static func main() {
         let application = NSApplication.shared
-        if let identifier = Bundle.main.bundleIdentifier,
+        #if DEBUG
+        let verifyingTermination = CommandLine.arguments.contains("--verify-update-termination")
+        #else
+        let verifyingTermination = false
+        #endif
+        if !verifyingTermination, let identifier = Bundle.main.bundleIdentifier,
            NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
             .contains(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
             return
         }
-        if !CommandLine.arguments.contains("--complete-update"),
+        if !verifyingTermination, !CommandLine.arguments.contains("--complete-update"),
            (try? UpdateInstaller.installationInProgress(application: Bundle.main.bundleURL)) == true {
             return
         }
-        application.setActivationPolicy(.accessory)
+        application.setActivationPolicy(verifyingTermination ? .prohibited : .accessory)
         let delegate = AppDelegate()
         application.delegate = delegate
         withExtendedLifetime(delegate) { application.run() }

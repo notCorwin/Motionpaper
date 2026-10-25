@@ -8,6 +8,21 @@ extension AppDelegate {
         URL(fileURLWithPath: ProcessInfo.processInfo.environment["MOTIONPAPER_VERIFICATION_DIRECTORY"] ?? "/tmp/motionpaper-verification")
     }
 
+    func verifyUpdateTermination() {
+        do {
+            try FileManager.default.createDirectory(at: verificationOutput, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: ["phase": "readyToQuit"])
+            try data.write(to: verificationOutput.appendingPathComponent("verification.json"), options: .atomic)
+            updates.start()
+            // Keep real asynchronous cleanup pending when the update task asks AppKit to quit.
+            guard updates.stop() != nil else { throw UpdateError.installerUnavailable }
+            Task { NSApp.terminate(nil) }
+        } catch {
+            fputs("Unable to verify update termination: \(error)\n", stderr)
+            exit(1)
+        }
+    }
+
     @MainActor
     func verifyUI() async {
         let output = verificationOutput
