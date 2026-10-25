@@ -10,7 +10,7 @@ private func manifestData(commit: String = commit, checksum: String = digest, si
                           download: String? = nil) throws -> Data {
     try JSONSerialization.data(withJSONObject: [
         "commit": commit, "publishedAt": "2026-10-25T00:00:00Z",
-        "downloadURL": download ?? "https://github.com/notCorwin/Wavepaper/releases/download/\(commit)/Wavepaper-\(commit.prefix(12)).dmg",
+        "downloadURL": download ?? "https://github.com/notCorwin/Wavepaper/releases/download/Autobuild-\(commit)/Wavepaper-\(commit.prefix(12)).dmg",
         "sha256": checksum, "size": size,
     ])
 }
@@ -22,9 +22,9 @@ private func manifestData(commit: String = commit, checksum: String = digest, si
     #expect(manifest.size == 3)
     for address in [
         "https://example.com/Wavepaper.dmg",
-        "https://github.com/another/Wavepaper/releases/download/\(commit)/Wavepaper-aaaaaaaaaaaa.dmg",
+        "https://github.com/another/Wavepaper/releases/download/Autobuild-\(commit)/Wavepaper-aaaaaaaaaaaa.dmg",
         "https://github.com/notCorwin/Wavepaper/releases/latest/download/Wavepaper-aaaaaaaaaaaa.dmg",
-        "https://github.com/notCorwin/Wavepaper/releases/download/\(commit)/Wavepaper-aaaaaaaaaaaa.dmg?redirect=1",
+        "https://github.com/notCorwin/Wavepaper/releases/download/Autobuild-\(commit)/Wavepaper-aaaaaaaaaaaa.dmg?redirect=1",
     ] {
         #expect(throws: (any Error).self) { try UpdateManifest.decode(manifestData(download: address), manifestURL: feed) }
     }

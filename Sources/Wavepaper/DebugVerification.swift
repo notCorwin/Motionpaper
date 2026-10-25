@@ -111,7 +111,7 @@ extension AppDelegate {
         let commit = String(repeating: "a", count: 40)
         let data = try JSONSerialization.data(withJSONObject: [
             "commit": commit, "publishedAt": "2026-10-25T00:00:00Z",
-            "downloadURL": "https://github.com/notCorwin/Wavepaper/releases/download/\(commit)/Wavepaper-aaaaaaaaaaaa.dmg",
+            "downloadURL": "https://github.com/notCorwin/Wavepaper/releases/download/Autobuild-\(commit)/Wavepaper-aaaaaaaaaaaa.dmg",
             "sha256": String(repeating: "b", count: 64), "size": 1,
         ])
         let manifest = try UpdateManifest.decode(data, manifestURL: URL(string: "https://github.com/notCorwin/Wavepaper/releases/latest/download/update.json")!)

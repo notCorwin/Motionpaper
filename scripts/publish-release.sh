@@ -15,10 +15,12 @@ if [[ ! $repository =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
     exit 1
 fi
 
+# GitHub rejects tags consisting solely of a full hexadecimal object ID.
+tag="Autobuild-$commit"
 short_commit=${commit:0:12}
 dmg_name="Wavepaper-$short_commit.dmg"
 dmg_path="dist/$dmg_name"
-download_url="https://github.com/$repository/releases/download/$commit/$dmg_name"
+download_url="https://github.com/$repository/releases/download/$tag/$dmg_name"
 [[ -s $dmg_path ]] || { echo "error: release DMG not found: $dmg_path" >&2; exit 1; }
 
 work_dir=$(mktemp -d)
@@ -44,12 +46,15 @@ release_file="$work_dir/release.json"
 release_exists=false
 # The tag endpoint omits unpublished drafts; the authenticated list includes them.
 gh api --paginate "repos/$repository/releases?per_page=100" \
-    --jq ".[] | select(.tag_name == \"$commit\")" >"$release_file"
-if [[ -s $release_file ]]; then
+    --jq ".[] | select(.tag_name == \"$tag\")" >"$work_dir/matching-releases.json"
+if [[ -s $work_dir/matching-releases.json ]]; then
+    # A failed creation can leave a draft behind. Prefer an already published
+    # release, otherwise resume one draft and remove duplicates after publishing.
+    jq -s 'sort_by(.draft, .id) | first' "$work_dir/matching-releases.json" >"$release_file"
     release_exists=true
     release_tag=$(jq -r '.tag_name' "$release_file")
     release_target=$(jq -r '.target_commitish' "$release_file")
-    [[ $release_tag == "$commit" && $release_target == "$commit" ]] || {
+    [[ $release_tag == "$tag" && $release_target == "$commit" ]] || {
         echo "error: release tag $commit is not a commit-targeted Wavepaper release" >&2
         exit 1
     }
@@ -80,7 +85,7 @@ validate_published_release() {
     }
 
     mkdir -p "$validation_dir"
-    gh release download "$commit" --repo "$repository" --pattern update.json --dir "$validation_dir"
+    gh release download "$tag" --repo "$repository" --pattern update.json --dir "$validation_dir"
     jq -e \
         --arg commit "$commit" \
         --arg url "$download_url" \
@@ -112,8 +117,8 @@ mark_release_latest() {
     gh api --method PATCH "repos/$repository/releases/$release_id" -f make_latest=true >"$work_dir/latest-release.json"
     local latest_tag
     latest_tag=$(gh api "repos/$repository/releases/latest" --jq '.tag_name')
-    [[ $latest_tag == "$commit" ]] || {
-        echo "error: GitHub latest release is $latest_tag instead of $commit" >&2
+    [[ $latest_tag == "$tag" ]] || {
+        echo "error: GitHub latest release is $latest_tag instead of $tag" >&2
         return 1
     }
 }
@@ -125,7 +130,7 @@ if [[ $release_exists == true && $release_is_draft == false ]]; then
     echo "Reusing complete published release $commit."
 else
     # A commit-named tag must point directly at that commit before it can be used.
-    if gh api "repos/$repository/git/ref/tags/$commit" >"$work_dir/tag.json" 2>/dev/null; then
+    if gh api "repos/$repository/git/ref/tags/$tag" >"$work_dir/tag.json" 2>/dev/null; then
         tag_type=$(jq -r '.object.type' "$work_dir/tag.json")
         tag_object=$(jq -r '.object.sha' "$work_dir/tag.json")
         [[ $tag_type == commit && $tag_object == "$commit" ]] || {
@@ -135,12 +140,15 @@ else
     fi
 
     if [[ $release_exists == false ]]; then
-        gh api --method POST "repos/$repository/releases" \
-            -f tag_name="$commit" \
+        if ! gh api --method POST "repos/$repository/releases" \
+            -f tag_name="$tag" \
             -f target_commitish="$commit" \
-            -f name="$short_commit" \
+            -f name="Autobuild" \
             -f body="Automated release for $default_branch commit $commit." \
-            -F draft=true >"$release_file"
+            -F draft=true >"$release_file"; then
+            cat "$release_file" >&2
+            exit 1
+        fi
     fi
 
     release_id=$(jq -r '.id' "$release_file")
@@ -160,7 +168,7 @@ else
         '{commit: $commit, publishedAt: $publishedAt, downloadURL: $downloadURL, sha256: $sha256, size: $size}' \
         >"$work_dir/update.json"
 
-    gh release upload "$commit" "$dmg_path" "$work_dir/update.json" \
+    gh release upload "$tag" "$dmg_path" "$work_dir/update.json" \
         --repo "$repository" --clobber
 
     # Recheck immediately before making the draft visible through latest/download.
@@ -170,17 +178,20 @@ else
     fi
 
     # Keep draft boolean-typed while make_latest remains a string enum.
-    gh api --method PATCH "repos/$repository/releases/$release_id" -F draft=false -f make_latest=true >"$work_dir/published.json"
+    if ! gh api --method PATCH "repos/$repository/releases/$release_id" -F draft=false -f make_latest=true >"$work_dir/published.json"; then
+        cat "$work_dir/published.json" >&2
+        exit 1
+    fi
     [[ $(jq -r '.draft' "$work_dir/published.json") == false ]] || {
         echo "error: GitHub did not publish release $commit" >&2
         exit 1
     }
     latest_tag=$(gh api "repos/$repository/releases/latest" --jq '.tag_name')
-    [[ $latest_tag == "$commit" ]] || {
-        echo "error: GitHub latest release is $latest_tag instead of $commit" >&2
+    [[ $latest_tag == "$tag" ]] || {
+        echo "error: GitHub latest release is $latest_tag instead of $tag" >&2
         exit 1
     }
-    gh api "repos/$repository/releases/tags/$commit" >"$release_file"
+    gh api "repos/$repository/releases/tags/$tag" >"$release_file"
     validate_published_release "$release_file"
     echo "Published release $commit."
 fi
@@ -204,14 +215,15 @@ gh api --paginate "repos/$repository/releases?per_page=100" \
 
 while IFS=$'\t' read -r old_release_id old_tag old_target; do
     [[ -n $old_release_id ]] || continue
-    [[ $old_tag != "$commit" ]] || continue
+    [[ $old_release_id != "$release_id" ]] || continue
 
     gh api --method DELETE "repos/$repository/releases/$old_release_id"
-    if [[ $old_tag =~ ^[0-9a-f]{40}$ && $old_target == "$old_tag" ]]; then
+    old_commit=${old_tag#Autobuild-}
+    if [[ $old_tag != "$tag" && $old_commit =~ ^[0-9a-f]{40}$ && $old_target == "$old_commit" ]]; then
         if gh api "repos/$repository/git/ref/tags/$old_tag" >"$work_dir/old-tag.json" 2>/dev/null; then
             old_tag_type=$(jq -r '.object.type' "$work_dir/old-tag.json")
             old_tag_object=$(jq -r '.object.sha' "$work_dir/old-tag.json")
-            if [[ $old_tag_type == commit && $old_tag_object == "$old_tag" ]]; then
+            if [[ $old_tag_type == commit && $old_tag_object == "$old_commit" ]]; then
                 gh api --method DELETE "repos/$repository/git/refs/tags/$old_tag"
             fi
         fi
