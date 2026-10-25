@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import UpdateCore
@@ -150,6 +151,29 @@ private let mismatchedCommit = String(repeating: "d", count: 40)
 
     #expect(try UpdateInstaller.bundleCommit(update.replacement) == originalCommit)
     #expect(try UpdateInstaller.bundleCommit(fixture.destination) == candidateCommit)
+}
+
+@Test func releasingLeaseUnlocksInheritedDescriptorsAndCannotCloseANewerLease() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("UpdateLeaseTests-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let descriptor = open(directory.appendingPathComponent("lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+    try #require(descriptor >= 0)
+    let lease = UpdateLease(fileDescriptor: descriptor)
+    try #require(flock(descriptor, LOCK_EX | LOCK_NB) == 0)
+    // A forked child shares this open file description. dup reproduces that
+    // ownership deterministically, without depending on subprocess timing.
+    let inherited = dup(descriptor)
+    try #require(inherited >= 0)
+    defer { close(inherited) }
+
+    try lease.close()
+    let next = try UpdateInstaller.acquireLease(directory: directory)
+    defer { try? next.close() }
+    try lease.close()
+    #expect(throws: UpdateError.self) {
+        try UpdateInstaller.acquireLease(directory: directory)
+    }
 }
 
 private struct InstallerFixture {

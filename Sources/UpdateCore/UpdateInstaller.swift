@@ -78,7 +78,7 @@ public enum UpdateInstaller {
             try Task.checkCancellation()
             let update = try? PreparedUpdate.load(from: directory)
             if let update, update.destination != application.resolvingSymlinksInPath() { continue }
-            let lease: FileHandle
+            let lease: UpdateLease
             do { lease = try acquireLease(directory: directory) }
             catch UpdateError.installationInProgress { continue }
             defer { try? lease.close() }
@@ -109,7 +109,7 @@ public enum UpdateInstaller {
             .map { $0.resolvingSymlinksInPath() }
     }
 
-    static func acquireLease(directory: URL) throws -> FileHandle {
+    static func acquireLease(directory: URL) throws -> UpdateLease {
         let descriptor = open(directory.appendingPathComponent("lock").path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
@@ -118,7 +118,7 @@ public enum UpdateInstaller {
             if code == EWOULDBLOCK { throw UpdateError.installationInProgress }
             throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
-        return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        return UpdateLease(fileDescriptor: descriptor)
     }
 
     static func bundleCommit(_ application: URL) throws -> String {
@@ -168,7 +168,7 @@ public struct PreparedUpdate: Codable, Sendable {
     private var confirmation: URL { directory.appendingPathComponent("launched.json") }
     var completed: URL { directory.appendingPathComponent("completed") }
 
-    public func acquireLease() throws -> FileHandle { try UpdateInstaller.acquireLease(directory: directory) }
+    public func acquireLease() throws -> UpdateLease { try UpdateInstaller.acquireLease(directory: directory) }
 
     public static func load(from directory: URL) throws -> Self {
         let data = try Data(contentsOf: directory.appendingPathComponent("update.json"))
