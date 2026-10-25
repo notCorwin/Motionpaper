@@ -1,110 +1,79 @@
 # Motionpaper
 
-<img src="assets/AppIcon.png" width="160" alt="Motionpaper 流动纸带 M 图标">
-
-[![Build and release](https://github.com/notCorwin/Motionpaper/actions/workflows/ci.yml/badge.svg)](https://github.com/notCorwin/Motionpaper/actions/workflows/ci.yml)
+<img src="assets/AppIcon.png" width="160" alt="Motionpaper 图标">
 
 让 Mac 的动态壁纸，一直动起来。
 
-Motionpaper 是一个轻量的 macOS 菜单栏应用，通过系统原生壁纸框架，让当前选用的动态壁纸持续播放。打开应用即开始播放，退出时释放播放会话，壁纸仍由系统设置管理。
+Motionpaper 是一个 macOS 菜单栏小工具，让当前选用的系统动态壁纸持续播放。打开应用后自动开始，壁纸仍在系统设置中选择。
 
-## 功能
+[下载最新版](https://github.com/notCorwin/Motionpaper/releases/latest) · [反馈问题](https://github.com/notCorwin/Motionpaper/issues)
 
-- **原生播放**：使用 macOS 自带的壁纸播放机制，无需导入视频。
-- **菜单栏运行**：没有主窗口和 Dock 图标，播放状态通过纸带 M 图标呈现。
-- **适配系统外观**：菜单栏图标支持浅色、深色外观，并遵循系统的减弱动态效果设置。
-- **检查更新**：启动时及每六小时检查新版本，也可从菜单手动检查；下载的安装镜像会校验大小与 SHA-256，并复用已通过校验的本地文件。
-- **精简依赖**：使用 Swift 和 Apple 系统框架，没有第三方 Swift 包依赖。
+## 安装前确认
 
-## 系统要求
+当前版本的播放功能仅支持以下环境：
 
 | 项目 | 要求 |
 | --- | --- |
-| 芯片 | Apple Silicon（arm64） |
-| 系统 | macOS 15.8.1，构建号 **24H32** |
-| 壁纸 | 在「系统设置 → 墙纸」中选用并下载支持播放的系统动态壁纸 |
-| 源码构建 | Swift 6.1 或更高版本，以及 macOS SDK（由 Xcode 或 Command Line Tools 提供） |
+| Mac 芯片 | Apple Silicon（M 系列） |
+| macOS | **15.8.1，构建号 24H32** |
+| 壁纸 | macOS 自带、支持播放的动态壁纸，且已下载完成 |
 
-应用使用私有的 `Wallpaper.framework` 及其 Swift ABI。尽管 Swift 包声明最低支持 macOS 15，当前实现会拒绝构建号不是 `24H32` 的系统；升级系统后的兼容性需要重新验证。
+可从苹果菜单打开「关于本机」查看 macOS 版本，点按版本号查看构建号，详见 [Apple 官方说明](https://support.apple.com/zh-cn/109033)。
 
-可在终端检查系统版本、构建号及芯片架构：
+**其他系统构建号目前无法开始播放。** 升级 macOS 后，请重新确认 Motionpaper 是否支持新系统。
 
-```sh
-sw_vers -productVersion
-sw_vers -buildVersion
-uname -m
-```
+## 安装与开始使用
 
-## 安装与使用
+1. 前往 [下载页面](https://github.com/notCorwin/Motionpaper/releases/latest)，在 **Assets（资源）** 中下载以 `.dmg` 结尾的安装包。
+2. 打开安装包，将 **Motionpaper** 拖入 **应用程序（Applications）** 文件夹。
+3. 在「系统设置 → 墙纸」中选择支持播放的系统动态壁纸，等待下载完成。
+4. 推出安装镜像，再从「应用程序」打开 Motionpaper。
+5. 屏幕顶部菜单栏出现 M 图标后，将鼠标停留在图标上；提示「Motionpaper：正在播放」即表示已开始播放。
 
-1. 从 [GitHub Releases](https://github.com/notCorwin/Motionpaper/releases/latest) 下载 `Motionpaper-<提交前 12 位>.dmg`。
-2. 打开镜像，将 Motionpaper 拖入 Applications。
-3. 在「系统设置 → 墙纸」中选择并下载支持播放的动态壁纸。
-4. 打开 Motionpaper，菜单栏出现纸带 M 图标后自动开始播放。
+当前安装包尚未经过 Apple 公证。如果首次打开时因无法验证开发者或未经过公证而被拦截，确认安装包来自本项目后，可按 [Apple 官方指引](https://support.apple.com/zh-cn/102445)，前往「系统设置 → 隐私与安全性」选择「仍要打开」。
 
-点击菜单栏图标可选择「检查更新…」或「退出 Motionpaper」。发现更新后，应用会下载、校验并打开安装镜像；退出应用后，将新版本拖入 Applications 替换，再重新打开即可。
+## 日常使用
 
-应用没有壁纸选择器或播放开关。要更换壁纸，请使用系统设置；要结束持续播放，请退出应用。如果菜单显示「无法开始播放，请退出后重新打开」，将鼠标停留在该条目上可查看具体错误。
+Motionpaper 常驻屏幕顶部菜单栏，没有主窗口，也不会显示在 Dock 中。
 
-构建脚本使用本地 ad hoc 签名，发布的安装包未使用 Developer ID 签名或经过 Apple 公证。
-
-## 从源码构建
-
-```sh
-git clone https://github.com/notCorwin/Motionpaper.git
-cd Motionpaper
-sh scripts/build-app.sh release
-open dist/Motionpaper.app
-```
-
-构建脚本会编译 arm64 可执行文件、生成图标、写入当前 Git 提交与更新地址，并将签名后的应用输出到 `dist/Motionpaper.app`。
-
-需要调试版本时，将 `release` 替换为 `debug`。构建自己的安装镜像：
-
-```sh
-sh scripts/package-release.sh
-```
-
-## 开发与验证
-
-运行核心逻辑测试：
-
-```sh
-swift test --parallel
-```
-
-测试覆盖播放会话的重复获取、取消、过期结果释放与失败重试，以及更新清单校验、提交比较、HTTP 错误处理和安装镜像缓存校验。测试使用模拟会话与本地网络替身，实际壁纸播放需要在受支持的 Mac 上验证。
-
-在兼容系统的桌面会话中，先退出已运行的 Motionpaper，再执行内置 UI 验证：
-
-```sh
-sh scripts/build-app.sh debug
-MOTIONPAPER_VERIFICATION_DIRECTORY=/tmp/motionpaper-verification \
-  dist/Motionpaper.app/Contents/MacOS/Motionpaper --verify-ui
-```
-
-验证会启动真实播放会话、检查菜单动作、采样图标动画、保存浅色与深色图标截图，并通过退出菜单关闭应用。输出目录中的 `verification.json` 在成功时应包含 `phase: "terminated"` 和 `shutdownState: "disabled"`；失败时包含 `error`。
-
-[GitHub Actions](.github/workflows/ci.yml) 负责运行测试和构建应用，并为默认分支的最新提交打包、发布 DMG。实际系统播放与 UI 验证需要在本地桌面会话中完成。
-
-### 代码导航
-
-| 路径 | 用途 |
+| 想做什么 | 如何操作 |
 | --- | --- |
-| [Sources/Motionpaper](Sources/Motionpaper) | 应用入口、菜单栏、原生壁纸绑定、更新交互与 UI 验证 |
-| [Sources/PlaybackCore](Sources/PlaybackCore) | 播放状态与异步会话生命周期 |
-| [Sources/UpdateCore](Sources/UpdateCore) | 更新清单、下载与缓存校验 |
-| [Tests](Tests) | 播放与更新核心逻辑测试 |
-| [Support](Support) | 应用元数据与私有框架链接存根 |
-| [Tools/GenerateIcon.swift](Tools/GenerateIcon.swift) | 从品牌源图生成应用与菜单栏图标 |
-| [scripts](scripts) | 构建、安装镜像打包与发布脚本 |
+| 查看播放状态 | 将鼠标停留在菜单栏的 M 图标上 |
+| 更换壁纸 | 在「系统设置 → 墙纸」中选择另一张支持播放的动态壁纸 |
+| 停止持续播放 | 点击 M 图标，选择「退出 Motionpaper」 |
+| 重新开始播放 | 再次打开 Motionpaper |
 
-## 获取帮助
+菜单栏图标会适配系统的浅色、深色外观。开启系统的「减弱动态效果」时，图标不会播放动画；可通过悬停提示确认播放状态。
 
-通过 [GitHub Issues](https://github.com/notCorwin/Motionpaper/issues) 报告问题或提出建议。请附上 macOS 版本、系统构建号、芯片架构、所选壁纸和错误提示；构建问题请同时提供 Swift 版本与相关输出。
+## 更新应用
+
+Motionpaper 会在启动时及运行期间每六小时检查一次更新。发现新版本后，菜单中会出现「更新并重新启动（版本标识）…」。点击后，应用会下载、校验并安装更新，然后自动重新启动。
+
+也可以点击菜单中的「检查更新…」手动检查，在弹窗中选择「更新并重新启动」或「稍后」。**下载和安装会在你选择更新后开始。**
+
+请从本机的「应用程序」文件夹运行 Motionpaper，并确保你有该文件夹的写入权限，以便应用完成更新。若提示无法自动更新，可退出应用，从 [下载页面](https://github.com/notCorwin/Motionpaper/releases/latest) 获取安装包，再拖入「应用程序」替换旧版本。
+
+## 遇到问题
+
+### 壁纸没有动起来
+
+先确认系统版本和构建号符合上面的要求，并且所选壁纸支持播放、已经下载完成。
+
+如果菜单中出现「无法开始播放，请退出后重新打开」，将鼠标停留在该条目上可查看具体原因，再退出并重新打开应用。
+
+### 反馈问题或提出建议
+
+请前往 [GitHub Issues](https://github.com/notCorwin/Motionpaper/issues)。报告播放或更新问题时，请附上：
+
+- macOS 版本和系统构建号；
+- Mac 芯片型号；
+- 所选壁纸的名称；
+- 问题出现前的操作，以及错误提示或截图。
 
 ## 维护与贡献
 
-项目由 [notCorwin](https://github.com/notCorwin) 维护，欢迎提交 Issue 或拉取请求。
+项目由 [notCorwin](https://github.com/notCorwin) 维护。欢迎通过 Issue 提出建议，或提交 Pull Request 改进应用与文档。
 
-贡献前请阅读相关源码，针对核心行为变更补充必要测试，并运行 `swift test --parallel` 和 `sh scripts/build-app.sh release`。涉及原生框架、菜单栏或播放行为的修改，还需在目标系统上验证，并在拉取请求中说明环境与结果。
+## 许可证
+
+本项目采用 [GNU GPL v3.0](LICENSE) 许可证。
