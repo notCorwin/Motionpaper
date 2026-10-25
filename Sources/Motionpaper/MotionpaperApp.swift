@@ -103,17 +103,14 @@ enum MotionpaperApp {
 
     @MainActor
     private static func verifyCompatibility() async -> Never {
-        let verifyPlayback = CommandLine.arguments.contains("--verify-playback")
+        let verifyLifecycle = CommandLine.arguments.contains("--verify-assertion-lifecycle")
         var interfaceAvailable = false
         let failure: String?
         do {
             try NativeWallpaperSession.checkCompatibility()
             interfaceAvailable = true
-            if verifyPlayback {
-                let first = try await NativeWallpaperSession.acquire()
-                first.release()
-                let second = try await NativeWallpaperSession.acquire()
-                second.release()
+            if verifyLifecycle {
+                try await verifyAssertionLifecycle()
             }
             failure = nil
         } catch {
@@ -128,13 +125,13 @@ enum MotionpaperApp {
             let systemVersion: String
             let architecture: String
             let interfaceAvailable: Bool
-            let playbackVerified: Bool
+            let assertionLifecycleVerified: Bool
             let error: String?
         }
         do {
             let report = Report(systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                                 architecture: architecture, interfaceAvailable: interfaceAvailable,
-                                playbackVerified: verifyPlayback && failure == nil, error: failure)
+                                assertionLifecycleVerified: verifyLifecycle && failure == nil, error: failure)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             var data = try encoder.encode(report)
@@ -144,5 +141,39 @@ enum MotionpaperApp {
             exit(EXIT_FAILURE)
         }
         exit(failure == nil ? EXIT_SUCCESS : EXIT_FAILURE)
+    }
+
+    @MainActor
+    private static func verifyAssertionLifecycle() async throws {
+        weak var observedSession: NativeWallpaperSession?
+        let controller = PlaybackController {
+            let session = try await NativeWallpaperSession.acquire()
+            observedSession = session
+            return session
+        }
+        defer { controller.setEnabled(false) }
+        for _ in 0..<2 {
+            controller.setEnabled(true)
+            let deadline = ContinuousClock.now + .seconds(10)
+            while controller.state == .starting, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            guard controller.state == .enabled, observedSession != nil else {
+                throw NSError(domain: "MotionpaperCompatibility", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Native assertion acquisition failed: \(controller.state)"])
+            }
+            // Exercise the controller's ownership during normal playback. This
+            // checks the assertion lifecycle, not rendered desktop frames.
+            try await Task.sleep(for: .seconds(2))
+            guard observedSession != nil else {
+                throw NSError(domain: "MotionpaperCompatibility", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "The controller released its native session while enabled"])
+            }
+            controller.setEnabled(false)
+            guard controller.state == .disabled, observedSession == nil else {
+                throw NSError(domain: "MotionpaperCompatibility", code: 3,
+                              userInfo: [NSLocalizedDescriptionKey: "The controller retained its native session after disabling playback"])
+            }
+        }
     }
 }

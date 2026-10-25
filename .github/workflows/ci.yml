@@ -61,6 +61,9 @@ jobs:
       - name: Test playback and update behavior
         run: swift test --parallel
 
+      - name: Test compatibility verifier contract
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
       - name: Verify update task can quit through AppKit
         run: python3 scripts/verify-update-termination.py "$(swift build --show-bin-path)/Motionpaper"
 
@@ -99,7 +102,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - runner: macos-15
@@ -118,34 +121,85 @@ jobs:
             macos: '27'
             architecture: arm64
     steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+          sparse-checkout: scripts/verify-compatibility.py
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@v8.0.2
         with:
           name: motionpaper-compatibility-app-${{ needs.build.outputs.commit }}
           path: dist
 
-      - name: Run native interface and playback verification
+      - name: Run native compatibility and assertion lifecycle verification
         timeout-minutes: 2
-        env:
-          EXPECTED_MACOS: ${{ matrix.macos }}
-          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
         run: |
-          actual_macos=$(sw_vers -productVersion | cut -d . -f 1)
-          actual_architecture=$(uname -m)
-          if [ "$actual_macos" != "$EXPECTED_MACOS" ]; then
-            echo "Expected macOS $EXPECTED_MACOS, found $actual_macos" >&2
-            exit 1
-          fi
-          if [ "$actual_architecture" != "$EXPECTED_ARCHITECTURE" ]; then
-            echo "Expected $EXPECTED_ARCHITECTURE, found $actual_architecture" >&2
-            exit 1
-          fi
           tar -xzf dist/Motionpaper.app.tar.gz -C dist
-          dist/Motionpaper.app/Contents/MacOS/Motionpaper --verify-compatibility --verify-playback | tee dist/compatibility.json
-          jq -e --arg architecture "$EXPECTED_ARCHITECTURE" \
-            '.interfaceAvailable == true and .playbackVerified == true and .architecture == $architecture' dist/compatibility.json >/dev/null
+          python3 scripts/verify-compatibility.py dist/Motionpaper.app \
+            --expected-commit '${{ needs.build.outputs.commit }}' \
+            --expected-major '${{ matrix.macos }}' \
+            --expected-architecture '${{ matrix.architecture }}' \
+            --output 'dist/compatibility-${{ matrix.runner }}.json'
+
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: motionpaper-compatibility-${{ needs.build.outputs.commit }}-${{ matrix.runner }}
+          path: dist/compatibility-${{ matrix.runner }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  compatibility-coverage:
+    needs: [build, compatibility]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+          sparse-checkout: |
+            Support/CompatibilityTargets.json
+            scripts/compatibility-coverage.py
+          sparse-checkout-cone-mode: false
+
+      - run: mkdir -p dist reports
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: motionpaper-compatibility-app-${{ needs.build.outputs.commit }}
+          path: dist
+
+      - uses: actions/download-artifact@v8.0.2
+        continue-on-error: true
+        with:
+          pattern: motionpaper-compatibility-${{ needs.build.outputs.commit }}-*
+          path: reports
+          merge-multiple: true
+
+      - name: Hash the release binaries and summarize exact target evidence
+        run: |
+          tar -xzf dist/Motionpaper.app.tar.gz -C dist
+          python3 scripts/compatibility-coverage.py \
+            --targets Support/CompatibilityTargets.json \
+            --reports-dir reports \
+            --app dist/Motionpaper.app \
+            --expected-commit '${{ needs.build.outputs.commit }}' \
+            --output dist/compatibility-coverage.json
+
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: motionpaper-compatibility-coverage-${{ needs.build.outputs.commit }}
+          path: dist/compatibility-coverage.json
+          if-no-files-found: error
+          retention-days: 90
 
   publish:
-    needs: [build, compatibility]
+    needs: [build, compatibility, compatibility-coverage]
     if: needs.build.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10

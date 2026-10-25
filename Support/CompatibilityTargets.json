@@ -1,0 +1,164 @@
+{
+  "source": "https://support.apple.com/en-us/100100",
+  "asOf": "2026-10-25",
+  "families": [
+    {
+      "major": 15,
+      "architectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "compatibilitySource": "https://support.apple.com/en-us/120282",
+      "versions": [
+        {
+          "version": "15.0"
+        },
+        {
+          "version": "15.0.1"
+        },
+        {
+          "version": "15.1"
+        },
+        {
+          "version": "15.1.1"
+        },
+        {
+          "version": "15.2"
+        },
+        {
+          "version": "15.3"
+        },
+        {
+          "version": "15.3.1"
+        },
+        {
+          "version": "15.3.2"
+        },
+        {
+          "version": "15.4"
+        },
+        {
+          "version": "15.4.1"
+        },
+        {
+          "version": "15.5"
+        },
+        {
+          "version": "15.6"
+        },
+        {
+          "version": "15.6.1"
+        },
+        {
+          "version": "15.7"
+        },
+        {
+          "version": "15.7.1"
+        },
+        {
+          "version": "15.7.2"
+        },
+        {
+          "version": "15.7.3"
+        },
+        {
+          "version": "15.7.4"
+        },
+        {
+          "version": "15.7.5"
+        },
+        {
+          "version": "15.7.7"
+        },
+        {
+          "version": "15.7.8"
+        },
+        {
+          "version": "15.7.9"
+        },
+        {
+          "version": "15.8"
+        },
+        {
+          "version": "15.8.1"
+        }
+      ]
+    },
+    {
+      "major": 26,
+      "architectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "compatibilitySource": "https://support.apple.com/en-us/122867",
+      "versions": [
+        {
+          "version": "26.0"
+        },
+        {
+          "version": "26.0.1"
+        },
+        {
+          "version": "26.1"
+        },
+        {
+          "version": "26.2"
+        },
+        {
+          "version": "26.3"
+        },
+        {
+          "version": "26.3.1"
+        },
+        {
+          "version": "26.3.2"
+        },
+        {
+          "version": "26.4"
+        },
+        {
+          "version": "26.4.1"
+        },
+        {
+          "version": "26.5"
+        },
+        {
+          "version": "26.5.1"
+        },
+        {
+          "version": "26.5.2"
+        },
+        {
+          "version": "26.6"
+        },
+        {
+          "version": "26.6.1"
+        },
+        {
+          "version": "26.6.2"
+        },
+        {
+          "version": "26.7"
+        },
+        {
+          "version": "26.7.1"
+        }
+      ]
+    },
+    {
+      "major": 27,
+      "architectures": [
+        "arm64"
+      ],
+      "compatibilitySource": "https://support.apple.com/en-us/127255",
+      "versions": [
+        {
+          "version": "27.0"
+        },
+        {
+          "version": "27.0.1"
+        }
+      ]
+    }
+  ]
+}

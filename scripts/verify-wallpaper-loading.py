@@ -19,13 +19,15 @@ def run(*arguments):
 
 def expect_unavailable(executable, environment):
     result = subprocess.run(
-        [str(executable), "--verify-compatibility"], env=environment,
+        [str(executable), "--verify-compatibility", "--verify-assertion-lifecycle"], env=environment,
         capture_output=True, text=True, timeout=15,
     )
     if result.returncode != 1:
         raise RuntimeError(f"Expected a handled compatibility error: {result.returncode}\n{result.stdout}\n{result.stderr}")
     report = json.loads(result.stdout)
-    if report["interfaceAvailable"] or report["playbackVerified"] or not report.get("error"):
+    if (report.get("interfaceAvailable") is not False
+            or report.get("assertionLifecycleVerified") is not False
+            or not report.get("error")):
         raise RuntimeError(f"Invalid compatibility failure: {report}")
     return report["error"]
 
