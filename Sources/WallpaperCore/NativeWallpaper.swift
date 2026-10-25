@@ -5,10 +5,10 @@ import PlaybackCore
 // Preserve Swift's async class-method calling convention, including swiftself.
 // Never instantiate this shim: use the framework's actual class metadata.
 @MainActor
-private class NativeAssertion {
+private class NativeAssertionFactory {
     @_weakLinked
     @_silgen_name("$s9Wallpaper0A25PresentationModeAssertionC08takeIdleD0ACXDyYaKFZ")
-    final class func takeIdleAssertion() async throws -> NativeAssertion
+    final class func takeIdleAssertion() async throws -> AnyObject
 }
 
 enum NativeWallpaperError: Error, Equatable, CustomStringConvertible {
@@ -45,20 +45,22 @@ enum WallpaperInterface {
 
 @MainActor
 public final class NativeWallpaperSession: PlaybackSession {
-    private var assertion: NativeAssertion?
+    // The private object's superclass and reference-counting implementation
+    // belong to the framework, so retain it through universal object ownership.
+    private var assertion: AnyObject?
 
-    private init(assertion: NativeAssertion) {
+    private init(assertion: AnyObject) {
         self.assertion = assertion
     }
 
     // Loaded-image capabilities are immutable for this process, so cache both
     // success and failure. Keep the framework loaded until the process exits.
-    private static let nativeClass: Result<NativeAssertion.Type, any Error> = Result {
+    private static let nativeClass: Result<NativeAssertionFactory.Type, any Error> = Result {
         // Inspect only the image dyld weak-linked at launch. Loading it for the
         // first time here would leave the already-bound weak imports null.
         let library = dlopen(WallpaperInterface.path, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD)
         let metadata = try WallpaperInterface.resolveMetadata(in: library)
-        return unsafeBitCast(metadata, to: NativeAssertion.Type.self)
+        return unsafeBitCast(metadata, to: NativeAssertionFactory.Type.self)
     }
 
     /// Check interface availability without acquiring a playback assertion.

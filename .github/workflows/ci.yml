@@ -72,7 +72,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: sh scripts/build-app.sh release
 
-      - name: Verify safe startup without private wallpaper capabilities
+      - name: Verify wallpaper linking and native assertion ownership
         run: python3 scripts/verify-wallpaper-loading.py dist/Motionpaper.app/Contents/MacOS/Motionpaper
 
       - name: Archive universal app for compatibility checks
