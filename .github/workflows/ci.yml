@@ -28,17 +28,19 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.default_branch || github.sha }}
 
       - id: swift
-        name: Identify Swift toolchain
+        name: Identify Swift toolchain and workspace
         run: |
           swift_version=$(swift --version | sed -n '1p' | sed -E 's/[^A-Za-z0-9._-]+/-/g')
           echo "version=$swift_version" >> "$GITHUB_OUTPUT"
+          workspace_hash=$(printf '%s' "$GITHUB_WORKSPACE" | shasum -a 256 | cut -d ' ' -f 1)
+          echo "workspace=$workspace_hash" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v6.1.0
         with:
           path: .build
-          key: ${{ runner.os }}-arm64-swift-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Tests/**', 'Support/Wallpaper.tbd', 'Tools/GenerateIcon.swift', 'assets/AppIcon.png') }}
+          key: ${{ runner.os }}-arm64-${{ steps.swift.outputs.workspace }}-swift-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Tests/**', 'Support/Wallpaper.tbd', 'Tools/GenerateIcon.swift', 'assets/AppIcon.png') }}
           restore-keys: |
-            ${{ runner.os }}-arm64-swift-${{ steps.swift.outputs.version }}-
+            ${{ runner.os }}-arm64-${{ steps.swift.outputs.workspace }}-swift-${{ steps.swift.outputs.version }}-
 
       - id: target
         name: Resolve release target
