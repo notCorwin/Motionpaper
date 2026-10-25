@@ -1,7 +1,10 @@
 import AppKit
+import Darwin
+import Dispatch
 import OSLog
 import PlaybackCore
 import UpdateCore
+import WallpaperCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -73,6 +76,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 enum MotionpaperApp {
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--verify-compatibility") {
+            Task { await verifyCompatibility() }
+            dispatchMain()
+        }
         let application = NSApplication.shared
         #if DEBUG
         let verifyingTermination = CommandLine.arguments.contains("--verify-update-termination")
@@ -92,5 +99,50 @@ enum MotionpaperApp {
         let delegate = AppDelegate()
         application.delegate = delegate
         withExtendedLifetime(delegate) { application.run() }
+    }
+
+    @MainActor
+    private static func verifyCompatibility() async -> Never {
+        let verifyPlayback = CommandLine.arguments.contains("--verify-playback")
+        var interfaceAvailable = false
+        let failure: String?
+        do {
+            try NativeWallpaperSession.checkCompatibility()
+            interfaceAvailable = true
+            if verifyPlayback {
+                let first = try await NativeWallpaperSession.acquire()
+                first.release()
+                let second = try await NativeWallpaperSession.acquire()
+                second.release()
+            }
+            failure = nil
+        } catch {
+            failure = String(describing: error)
+        }
+        #if arch(arm64)
+        let architecture = "arm64"
+        #else
+        let architecture = "x86_64"
+        #endif
+        struct Report: Encodable {
+            let systemVersion: String
+            let architecture: String
+            let interfaceAvailable: Bool
+            let playbackVerified: Bool
+            let error: String?
+        }
+        do {
+            let report = Report(systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                                architecture: architecture, interfaceAvailable: interfaceAvailable,
+                                playbackVerified: verifyPlayback && failure == nil, error: failure)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            var data = try encoder.encode(report)
+            data.append(0x0a)
+            try FileHandle.standardOutput.write(contentsOf: data)
+        } catch {
+            exit(EXIT_FAILURE)
+        }
+        exit(failure == nil ? EXIT_SUCCESS : EXIT_FAILURE)
     }
 }

@@ -14,13 +14,18 @@ let package = Package(
     targets: [
         .target(name: "PlaybackCore"),
         .target(name: "UpdateCore"),
+        .target(
+            name: "WallpaperCore",
+            dependencies: ["PlaybackCore"],
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-weak_library", "-Xlinker", "\(root)/Support/Wallpaper.tbd"])]
+        ),
         .executableTarget(name: "MotionpaperUpdater", dependencies: ["UpdateCore"]),
         .executableTarget(
             name: "Motionpaper",
-            dependencies: ["PlaybackCore", "UpdateCore"],
-            linkerSettings: [.unsafeFlags(["-Xlinker", "\(root)/Support/Wallpaper.tbd"])]
+            dependencies: ["PlaybackCore", "UpdateCore", "WallpaperCore"]
         ),
         .testTarget(name: "PlaybackCoreTests", dependencies: ["PlaybackCore"]),
         .testTarget(name: "UpdateCoreTests", dependencies: ["UpdateCore"]),
+        .testTarget(name: "WallpaperCoreTests", dependencies: ["WallpaperCore"]),
     ]
 )

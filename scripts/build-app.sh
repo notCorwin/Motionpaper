@@ -27,12 +27,18 @@ esac
 
 motionpaper_update_url="https://github.com/$motionpaper_repository/releases/latest/download/update.json"
 swift build -c "$motionpaper_configuration" --arch arm64
-motionpaper_bin=$(swift build -c "$motionpaper_configuration" --arch arm64 --show-bin-path)
+motionpaper_arm64_bin=$(swift build -c "$motionpaper_configuration" --arch arm64 --show-bin-path)
+swift build -c "$motionpaper_configuration" --arch x86_64
+motionpaper_x86_64_bin=$(swift build -c "$motionpaper_configuration" --arch x86_64 --show-bin-path)
 motionpaper_app="$motionpaper_root/dist/Motionpaper.app"
 mkdir -p "$motionpaper_app/Contents/MacOS" "$motionpaper_app/Contents/Resources" "$motionpaper_app/Contents/Helpers" .build/icon-tools
-install -m 755 "$motionpaper_bin/Motionpaper" "$motionpaper_app/Contents/MacOS/Motionpaper"
-install -m 755 "$motionpaper_bin/MotionpaperUpdater" "$motionpaper_app/Contents/Helpers/MotionpaperUpdater"
-/usr/bin/codesign --force --sign - --identifier local.motionpaper.updater "$motionpaper_app/Contents/Helpers/MotionpaperUpdater"
+motionpaper_executable="$motionpaper_app/Contents/MacOS/Motionpaper"
+motionpaper_updater="$motionpaper_app/Contents/Helpers/MotionpaperUpdater"
+rm -f "$motionpaper_executable" "$motionpaper_updater"
+xcrun lipo -create "$motionpaper_arm64_bin/Motionpaper" "$motionpaper_x86_64_bin/Motionpaper" -output "$motionpaper_executable"
+xcrun lipo -create "$motionpaper_arm64_bin/MotionpaperUpdater" "$motionpaper_x86_64_bin/MotionpaperUpdater" -output "$motionpaper_updater"
+chmod 755 "$motionpaper_executable" "$motionpaper_updater"
+/usr/bin/codesign --force --sign - --identifier local.motionpaper.updater "$motionpaper_updater"
 cp Support/Info.plist "$motionpaper_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MotionpaperCommit $motionpaper_commit" "$motionpaper_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MotionpaperUpdateURL $motionpaper_update_url" "$motionpaper_app/Contents/Info.plist"
@@ -48,5 +54,5 @@ fi
 cp .build/icon-tools/AppIcon.icns "$motionpaper_app/Contents/Resources/AppIcon.icns"
 cp .build/icon-tools/StatusIcon.png "$motionpaper_app/Contents/Resources/StatusIcon.png"
 /usr/bin/codesign --force --sign - --identifier local.motionpaper.app "$motionpaper_app"
-/usr/bin/codesign --verify --deep --strict "$motionpaper_app"
+sh scripts/verify-app.sh "$motionpaper_app"
 echo "$motionpaper_app"

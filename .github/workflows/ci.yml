@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 15
     outputs:
       commit: ${{ steps.target.outputs.commit }}
@@ -38,9 +38,9 @@ jobs:
       - uses: actions/cache@v6.1.0
         with:
           path: .build
-          key: ${{ runner.os }}-arm64-${{ steps.swift.outputs.workspace }}-swift-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Tests/**', 'Support/Wallpaper.tbd', 'Tools/GenerateIcon.swift', 'assets/AppIcon.png') }}
+          key: ${{ runner.os }}-universal-${{ steps.swift.outputs.workspace }}-swift-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Tests/**', 'Support/Wallpaper.tbd', 'Tools/GenerateIcon.swift', 'assets/AppIcon.png') }}
           restore-keys: |
-            ${{ runner.os }}-arm64-${{ steps.swift.outputs.workspace }}-swift-${{ steps.swift.outputs.version }}-
+            ${{ runner.os }}-universal-${{ steps.swift.outputs.workspace }}-swift-${{ steps.swift.outputs.version }}-
 
       - id: target
         name: Resolve release target
@@ -69,6 +69,19 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: sh scripts/build-app.sh release
 
+      - name: Verify safe startup without private wallpaper capabilities
+        run: python3 scripts/verify-wallpaper-loading.py dist/Motionpaper.app/Contents/MacOS/Motionpaper
+
+      - name: Archive universal app for compatibility checks
+        run: tar -czf dist/Motionpaper.app.tar.gz -C dist Motionpaper.app
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: motionpaper-compatibility-app-${{ steps.target.outputs.commit }}
+          path: dist/Motionpaper.app.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Package release DMG
         if: steps.target.outputs.should_release == 'true'
         run: sh scripts/package-release.sh
@@ -81,8 +94,58 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  publish:
+  compatibility:
     needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: macos-15
+            macos: '15'
+            architecture: arm64
+          - runner: macos-15-intel
+            macos: '15'
+            architecture: x86_64
+          - runner: macos-26
+            macos: '26'
+            architecture: arm64
+          - runner: macos-26-intel
+            macos: '26'
+            architecture: x86_64
+          - runner: xcode-27
+            macos: '27'
+            architecture: arm64
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: motionpaper-compatibility-app-${{ needs.build.outputs.commit }}
+          path: dist
+
+      - name: Run native interface and playback verification
+        timeout-minutes: 2
+        env:
+          EXPECTED_MACOS: ${{ matrix.macos }}
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          actual_macos=$(sw_vers -productVersion | cut -d . -f 1)
+          actual_architecture=$(uname -m)
+          if [ "$actual_macos" != "$EXPECTED_MACOS" ]; then
+            echo "Expected macOS $EXPECTED_MACOS, found $actual_macos" >&2
+            exit 1
+          fi
+          if [ "$actual_architecture" != "$EXPECTED_ARCHITECTURE" ]; then
+            echo "Expected $EXPECTED_ARCHITECTURE, found $actual_architecture" >&2
+            exit 1
+          fi
+          tar -xzf dist/Motionpaper.app.tar.gz -C dist
+          dist/Motionpaper.app/Contents/MacOS/Motionpaper --verify-compatibility --verify-playback | tee dist/compatibility.json
+          jq -e --arg architecture "$EXPECTED_ARCHITECTURE" \
+            '.interfaceAvailable == true and .playbackVerified == true and .architecture == $architecture' dist/compatibility.json >/dev/null
+
+  publish:
+    needs: [build, compatibility]
     if: needs.build.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -95,7 +95,7 @@ final class StatusItemController: NSObject {
         case .enabled: description = "Motionpaper：正在播放"
         case .failed(let message):
             description = "Motionpaper：无法开始播放"
-            errorItem.title = "无法开始播放，请退出后重新打开"
+            errorItem.title = "无法开始播放"
             errorItem.toolTip = message
             errorItem.isHidden = false
         }
