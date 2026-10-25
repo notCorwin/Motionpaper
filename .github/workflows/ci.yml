@@ -1,4 +1,4 @@
-name: Build and test
+name: Build and release
 
 on:
   push:
@@ -10,23 +10,94 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  verify:
+  build:
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    outputs:
+      commit: ${{ steps.target.outputs.commit }}
+      short_commit: ${{ steps.target.outputs.short_commit }}
+      default_branch: ${{ steps.target.outputs.default_branch }}
+      should_release: ${{ steps.target.outputs.should_release }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Test playback ownership and cancellation
-        run: swift test --parallel
-      - name: Build the menu bar app
-        run: sh scripts/build-app.sh release
-      - name: Package the app
-        run: ditto -c -k --keepParent dist/Wavepaper.app dist/Wavepaper.zip
-      - uses: actions/upload-artifact@v7.0.2
         with:
-          name: Wavepaper
-          path: dist/Wavepaper.zip
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.default_branch || github.sha }}
+
+      - id: swift
+        name: Identify Swift toolchain
+        run: |
+          swift_version=$(swift --version | sed -n '1p' | sed -E 's/[^A-Za-z0-9._-]+/-/g')
+          echo "version=$swift_version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6.1.0
+        with:
+          path: .build
+          key: ${{ runner.os }}-arm64-swift-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Tests/**', 'Support/Wallpaper.tbd', 'Tools/GenerateIcon.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-arm64-swift-${{ steps.swift.outputs.version }}-
+
+      - id: target
+        name: Resolve release target
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          commit=$(git rev-parse HEAD)
+          short_commit=$(printf '%s' "$commit" | cut -c 1-12)
+          should_release=false
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || { [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ]; }; then
+            should_release=true
+          fi
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+          printf 'short_commit=%s\n' "$short_commit" >> "$GITHUB_OUTPUT"
+          printf 'default_branch=%s\n' "$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+          printf 'should_release=%s\n' "$should_release" >> "$GITHUB_OUTPUT"
+
+      - name: Test playback and update behavior
+        run: swift test --parallel
+
+      - name: Build the menu bar app
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: sh scripts/build-app.sh release
+
+      - name: Package release DMG
+        if: steps.target.outputs.should_release == 'true'
+        run: sh scripts/package-release.sh
+
+      - uses: actions/upload-artifact@v7.0.2
+        if: steps.target.outputs.should_release == 'true'
+        with:
+          name: wavepaper-release-${{ steps.target.outputs.commit }}
+          path: dist/Wavepaper-${{ steps.target.outputs.short_commit }}.dmg
           if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: needs.build.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: wavepaper-release-${{ needs.build.outputs.commit }}
+          path: dist
+
+      - name: Publish release and remove obsolete commit releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+          DEFAULT_BRANCH: ${{ needs.build.outputs.default_branch }}
+        run: bash scripts/publish-release.sh

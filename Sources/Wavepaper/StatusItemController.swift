@@ -4,17 +4,24 @@ import QuartzCore
 
 @MainActor
 final class StatusItemController: NSObject {
+    static let identifier = "Wavepaper.StatusItem"
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let symbolView = StatusSymbolView()
     let menu = NSMenu()
     private let errorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let updateItem = NSMenuItem(title: "检查更新…", action: nil, keyEquivalent: "")
+    private let downloadItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    var onCheckForUpdates: (@MainActor () -> Void)?
+    var onDownloadUpdate: (@MainActor () -> Void)?
 
     override init() {
         super.init()
-        statusItem.autosaveName = "Wavepaper.StatusItem"
+        statusItem.autosaveName = Self.identifier
         statusItem.isVisible = true
         guard let button = statusItem.button else { return }
         button.title = ""
+        // Ice identifies an item by its bundle ID and CGWindow title.
+        button.window?.title = Self.identifier
         button.addSubview(symbolView)
         symbolView.setAccessibilityElement(false)
         symbolView.translatesAutoresizingMaskIntoConstraints = false
@@ -28,11 +35,47 @@ final class StatusItemController: NSObject {
         errorItem.isHidden = true
         menu.autoenablesItems = false
         menu.addItem(errorItem)
+        updateItem.target = self
+        updateItem.action = #selector(checkForUpdates)
+        if let commit = Bundle.main.object(forInfoDictionaryKey: "WavepaperCommit") as? String {
+            updateItem.toolTip = "当前提交：\(commit.prefix(12))"
+        }
+        menu.addItem(updateItem)
+        downloadItem.target = self
+        downloadItem.action = #selector(downloadUpdate)
+        downloadItem.isHidden = true
+        menu.addItem(downloadItem)
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出 Wavepaper", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
         statusItem.menu = menu
         update(.disabled)
+    }
+
+    @objc private func checkForUpdates() { onCheckForUpdates?() }
+    @objc private func downloadUpdate() { onDownloadUpdate?() }
+
+    func update(_ state: UpdateController.State) {
+        updateItem.isEnabled = true
+        updateItem.title = "检查更新…"
+        downloadItem.isHidden = true
+        downloadItem.isEnabled = true
+        switch state {
+        case .idle:
+            break
+        case .checking:
+            updateItem.title = "正在检查更新…"
+            updateItem.isEnabled = false
+        case .available(let manifest):
+            downloadItem.isHidden = false
+            downloadItem.title = "下载更新（\(manifest.shortCommit)）…"
+        case .downloading:
+            updateItem.isEnabled = false
+            downloadItem.isHidden = false
+            downloadItem.title = "正在下载更新…"
+            downloadItem.isEnabled = false
+        }
     }
 
     func update(_ state: PlaybackController.State) {

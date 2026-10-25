@@ -10,11 +10,13 @@ let package = Package(
     products: [.executable(name: "Wavepaper", targets: ["Wavepaper"])],
     targets: [
         .target(name: "PlaybackCore"),
+        .target(name: "UpdateCore"),
         .executableTarget(
             name: "Wavepaper",
-            dependencies: ["PlaybackCore"],
+            dependencies: ["PlaybackCore", "UpdateCore"],
             linkerSettings: [.unsafeFlags(["-Xlinker", "\(root)/Support/Wallpaper.tbd"])]
         ),
         .testTarget(name: "PlaybackCoreTests", dependencies: ["PlaybackCore"]),
+        .testTarget(name: "UpdateCoreTests", dependencies: ["UpdateCore"]),
     ]
 )

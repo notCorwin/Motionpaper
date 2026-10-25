@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import UpdateCore
 
 extension AppDelegate {
     private var verificationOutput: URL {
@@ -21,6 +22,7 @@ extension AppDelegate {
             observations["iconOpacity"] = statusItem.symbolView.alphaValue
             observations["waveOpacities"] = statusItem.symbolView.currentWaveOpacities
             observations["timestamp"] = Date().timeIntervalSince1970
+            observations["menuBarWindowTitle"] = statusItem.symbolView.window?.title
             let data = try JSONSerialization.data(withJSONObject: observations, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: output.appendingPathComponent("verification.json"), options: .atomic)
         }
@@ -46,13 +48,20 @@ extension AppDelegate {
         do {
             try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
             try await waitUntilEnabled()
+            let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+            let titles = windows.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == ProcessInfo.processInfo.processIdentifier }
+                .compactMap { $0[kCGWindowName as String] as? String }
+            observations["windowTitles"] = titles
             let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
-            guard visibleItems.map(\.title) == ["退出 Wavepaper"],
+            guard visibleItems.filter({ !$0.isSeparatorItem }).map(\.title) == ["检查更新…", "退出 Wavepaper"],
                   visibleItems.allSatisfy({ $0.state == .off }),
                   statusItem.symbolView.playbackEnabled,
-                  let quit = visibleItems.first else {
-                throw NSError(domain: "WavepaperVerification", code: 2, userInfo: [NSLocalizedDescriptionKey: "Expected automatic playback and a quit-only menu"])
+                  titles.contains(StatusItemController.identifier),
+                  let quit = visibleItems.last else {
+                throw NSError(domain: "WavepaperVerification", code: 2, userInfo: [NSLocalizedDescriptionKey: "Expected automatic playback, update/quit actions, and stable CGWindow identity"])
             }
+            try verifyUpdateMenu()
+            observations["updateMenuVerified"] = true
             try record("enabled")
             var samples: [[String: Any]] = []
             for _ in 0..<16 {
@@ -75,6 +84,46 @@ extension AppDelegate {
             try? record("failed")
             NSApp.terminate(nil)
         }
+    }
+
+    private func verifyUpdateMenu() throws {
+        let originalCheck = statusItem.onCheckForUpdates
+        let originalDownload = statusItem.onDownloadUpdate
+        defer {
+            statusItem.onCheckForUpdates = originalCheck
+            statusItem.onDownloadUpdate = originalDownload
+            statusItem.update(UpdateController.State.idle)
+        }
+        var checks = 0
+        var downloads = 0
+        statusItem.onCheckForUpdates = { checks += 1 }
+        statusItem.onDownloadUpdate = { downloads += 1 }
+        func require(_ valid: Bool) throws {
+            guard valid else {
+                throw NSError(domain: "WavepaperVerification", code: 3,
+                              userInfo: [NSLocalizedDescriptionKey: "Update menu states or actions are incorrect"])
+            }
+        }
+        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: "检查更新…"))
+        try require(checks == 1)
+        statusItem.update(UpdateController.State.checking)
+        try require(statusItem.menu.item(withTitle: "正在检查更新…")?.isEnabled == false)
+        let commit = String(repeating: "a", count: 40)
+        let data = try JSONSerialization.data(withJSONObject: [
+            "commit": commit, "publishedAt": "2026-10-25T00:00:00Z",
+            "downloadURL": "https://github.com/notCorwin/Wavepaper/releases/download/\(commit)/Wavepaper-aaaaaaaaaaaa.dmg",
+            "sha256": String(repeating: "b", count: 64), "size": 1,
+        ])
+        let manifest = try UpdateManifest.decode(data, manifestURL: URL(string: "https://github.com/notCorwin/Wavepaper/releases/latest/download/update.json")!)
+        statusItem.update(UpdateController.State.available(manifest))
+        let downloadTitle = "下载更新（aaaaaaaaaaaa）…"
+        try require(statusItem.menu.item(withTitle: downloadTitle)?.isHidden == false)
+        try require(statusItem.menu.item(withTitle: "检查更新…")?.isEnabled == true)
+        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: downloadTitle))
+        try require(downloads == 1)
+        statusItem.update(UpdateController.State.downloading(manifest))
+        try require(statusItem.menu.item(withTitle: "正在下载更新…")?.isEnabled == false)
+        try require(statusItem.menu.item(withTitle: "检查更新…")?.isEnabled == false)
     }
 
     func verifyTermination() {

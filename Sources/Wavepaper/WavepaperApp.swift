@@ -6,9 +6,13 @@ import PlaybackCore
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let playback = PlaybackController { try await NativeWallpaperSession.acquire() }
     let statusItem = StatusItemController()
+    let updates = UpdateController()
     private let logger = Logger(subsystem: "local.wavepaper.app", category: "playback")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        statusItem.onCheckForUpdates = { [weak self] in self?.updates.checkForUpdates() }
+        statusItem.onDownloadUpdate = { [weak self] in self?.updates.downloadAvailableUpdate() }
+        updates.onStateChange = { [weak self] state in self?.statusItem.update(state) }
         playback.onStateChange = { [weak self] state in
             guard let self else { return }
             self.statusItem.update(state)
@@ -18,11 +22,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         if CommandLine.arguments.contains("--verify-ui") {
             Task { await verifyUI() }
+            return
         }
         #endif
+        updates.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        updates.stop()
         playback.setEnabled(false)
         #if DEBUG
         if CommandLine.arguments.contains("--verify-ui") {
