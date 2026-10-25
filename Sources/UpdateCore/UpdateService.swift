@@ -60,6 +60,11 @@ public actor UpdateService {
         return try await download.value
     }
 
+    public func cancel() {
+        checkRequest?.cancel()
+        for download in downloads.values { download.cancel() }
+    }
+
     public static func verify(_ file: URL, manifest: UpdateManifest) throws -> Bool {
         let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
         guard (attributes[.size] as? NSNumber)?.int64Value == manifest.size else { return false }

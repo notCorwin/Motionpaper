@@ -9,6 +9,7 @@ final class UpdateController {
         case checking
         case available(UpdateManifest)
         case downloading(UpdateManifest)
+        case installing
     }
 
     private(set) var state: State = .idle {
@@ -19,6 +20,8 @@ final class UpdateController {
     private var availableUpdate: UpdateManifest?
     private var operation: Task<Void, Never>?
     private var automaticCheck: Task<Void, Never>?
+    private var stopping = false
+    private var shutdown: Task<Void, Never>?
     private let logger = Logger(subsystem: "local.motionpaper.app", category: "updates")
 
     init() {
@@ -35,8 +38,12 @@ final class UpdateController {
     }
 
     func start() {
-        guard service != nil, automaticCheck == nil else { return }
+        guard !stopping, service != nil, automaticCheck == nil else { return }
         automaticCheck = Task { [weak self] in
+            do { try await UpdateInstaller.removeStaleInstallations(application: Bundle.main.bundleURL) }
+            catch {
+                self?.logger.error("Stale update cleanup failed: \(error.localizedDescription, privacy: .public)")
+            }
             while !Task.isCancelled {
                 self?.check(userInitiated: false)
                 do { try await Task.sleep(for: .seconds(6 * 60 * 60)) }
@@ -47,19 +54,31 @@ final class UpdateController {
 
     func checkForUpdates() { check(userInitiated: true) }
 
-    func downloadAvailableUpdate() {
-        if let availableUpdate { download(availableUpdate) }
+    func installAvailableUpdate() {
+        if let availableUpdate { install(availableUpdate) }
     }
 
-    func stop() {
-        automaticCheck?.cancel()
+    func stop() -> Task<Void, Never>? {
+        if let shutdown { return shutdown }
+        stopping = true
+        let checks = automaticCheck
+        checks?.cancel()
         automaticCheck = nil
-        operation?.cancel()
+        let pending = operation
+        pending?.cancel()
         operation = nil
+        guard checks != nil || pending != nil else { return nil }
+        let shutdown = Task { [service] in
+            await service?.cancel()
+            await pending?.value
+            await checks?.value
+        }
+        self.shutdown = shutdown
+        return shutdown
     }
 
     private func check(userInitiated: Bool) {
-        guard operation == nil else { return }
+        guard !stopping, operation == nil else { return }
         guard let service else {
             if userInitiated { showAlert("无法检查更新", "请使用构建脚本或 GitHub Release 提供的应用。") }
             return
@@ -67,10 +86,10 @@ final class UpdateController {
         state = .checking
         operation = Task { [weak self] in
             guard let self else { return }
-            var requestedDownload: UpdateManifest?
+            var requestedInstall: UpdateManifest?
             defer {
                 operation = nil
-                if let requestedDownload { download(requestedDownload) }
+                if let requestedInstall, !Task.isCancelled, !stopping { install(requestedInstall) }
             }
             do {
                 let manifest = try await service.check()
@@ -81,12 +100,12 @@ final class UpdateController {
                     if let manifest {
                         let alert = NSAlert()
                         alert.messageText = "发现更新 \(manifest.shortCommit)"
-                        alert.informativeText = "下载并校验安装镜像后，将打开镜像供安装。"
-                        alert.addButton(withTitle: "下载更新")
+                        alert.informativeText = "下载完成后将自动安装并重新启动 Motionpaper。"
+                        alert.addButton(withTitle: "更新并重新启动")
                         alert.addButton(withTitle: "稍后")
                         NSApp.activate()
-                        if alert.runModal() == .alertFirstButtonReturn {
-                            requestedDownload = manifest
+                        if alert.runModal() == .alertFirstButtonReturn, !Task.isCancelled, !stopping {
+                            requestedInstall = manifest
                         }
                     } else {
                         showAlert("已是最新提交", "当前 Motionpaper 与最新 Release 一致。")
@@ -101,8 +120,8 @@ final class UpdateController {
         }
     }
 
-    private func download(_ manifest: UpdateManifest) {
-        guard operation == nil, let service else { return }
+    private func install(_ manifest: UpdateManifest) {
+        guard !stopping, operation == nil, let service else { return }
         state = .downloading(manifest)
         operation = Task { [weak self] in
             guard let self else { return }
@@ -111,16 +130,22 @@ final class UpdateController {
                 state = .available(manifest)
             }
             do {
+                try UpdateInstaller.validateDestination(Bundle.main.bundleURL)
                 let file = try await service.download(manifest)
                 guard !Task.isCancelled else { return }
-                guard NSWorkspace.shared.open(file) else {
-                    showAlert("无法打开安装镜像", "请重试，或从 GitHub Release 下载更新。")
-                    return
-                }
-                showAlert("安装更新 \(manifest.shortCommit)", "请退出 Motionpaper，将镜像中的 Motionpaper 拖入 Applications 并替换，然后重新打开应用。")
+                state = .installing
+                let update = try await UpdateInstaller.prepare(image: file, manifest: manifest,
+                                                               application: Bundle.main.bundleURL)
+                var handedOff = false
+                defer { if !handedOff { update.discard() } }
+                try await update.startInstaller(parentPID: ProcessInfo.processInfo.processIdentifier)
+                handedOff = true
+                operation = nil
+                NSApp.terminate(nil)
             } catch {
                 guard !Task.isCancelled else { return }
-                showAlert("更新下载失败", error.localizedDescription)
+                logger.error("Update installation failed: \(error.localizedDescription, privacy: .public)")
+                showAlert("无法安装更新", error.localizedDescription)
             }
         }
     }

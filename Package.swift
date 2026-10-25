@@ -7,10 +7,14 @@ let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let package = Package(
     name: "Motionpaper",
     platforms: [.macOS(.v15)],
-    products: [.executable(name: "Motionpaper", targets: ["Motionpaper"])],
+    products: [
+        .executable(name: "Motionpaper", targets: ["Motionpaper"]),
+        .executable(name: "MotionpaperUpdater", targets: ["MotionpaperUpdater"]),
+    ],
     targets: [
         .target(name: "PlaybackCore"),
         .target(name: "UpdateCore"),
+        .executableTarget(name: "MotionpaperUpdater", dependencies: ["UpdateCore"]),
         .executableTarget(
             name: "Motionpaper",
             dependencies: ["PlaybackCore", "UpdateCore"],

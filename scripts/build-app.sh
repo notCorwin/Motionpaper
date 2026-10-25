@@ -26,11 +26,13 @@ case "$motionpaper_repository" in
 esac
 
 motionpaper_update_url="https://github.com/$motionpaper_repository/releases/latest/download/update.json"
-swift build -c "$motionpaper_configuration" --arch arm64 --product Motionpaper
+swift build -c "$motionpaper_configuration" --arch arm64
 motionpaper_bin=$(swift build -c "$motionpaper_configuration" --arch arm64 --show-bin-path)
 motionpaper_app="$motionpaper_root/dist/Motionpaper.app"
-mkdir -p "$motionpaper_app/Contents/MacOS" "$motionpaper_app/Contents/Resources" .build/icon-tools
+mkdir -p "$motionpaper_app/Contents/MacOS" "$motionpaper_app/Contents/Resources" "$motionpaper_app/Contents/Helpers" .build/icon-tools
 install -m 755 "$motionpaper_bin/Motionpaper" "$motionpaper_app/Contents/MacOS/Motionpaper"
+install -m 755 "$motionpaper_bin/MotionpaperUpdater" "$motionpaper_app/Contents/Helpers/MotionpaperUpdater"
+/usr/bin/codesign --force --sign - --identifier local.motionpaper.updater "$motionpaper_app/Contents/Helpers/MotionpaperUpdater"
 cp Support/Info.plist "$motionpaper_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MotionpaperCommit $motionpaper_commit" "$motionpaper_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MotionpaperUpdateURL $motionpaper_update_url" "$motionpaper_app/Contents/Info.plist"

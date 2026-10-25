@@ -96,16 +96,16 @@ extension AppDelegate {
 
     private func verifyUpdateMenu() throws {
         let originalCheck = statusItem.onCheckForUpdates
-        let originalDownload = statusItem.onDownloadUpdate
+        let originalInstall = statusItem.onInstallUpdate
         defer {
             statusItem.onCheckForUpdates = originalCheck
-            statusItem.onDownloadUpdate = originalDownload
+            statusItem.onInstallUpdate = originalInstall
             statusItem.update(UpdateController.State.idle)
         }
         var checks = 0
-        var downloads = 0
+        var installs = 0
         statusItem.onCheckForUpdates = { checks += 1 }
-        statusItem.onDownloadUpdate = { downloads += 1 }
+        statusItem.onInstallUpdate = { installs += 1 }
         func require(_ valid: Bool) throws {
             guard valid else {
                 throw NSError(domain: "MotionpaperVerification", code: 3,
@@ -124,13 +124,16 @@ extension AppDelegate {
         ])
         let manifest = try UpdateManifest.decode(data, manifestURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/latest/download/update.json")!)
         statusItem.update(UpdateController.State.available(manifest))
-        let downloadTitle = "下载更新（aaaaaaaaaaaa）…"
-        try require(statusItem.menu.item(withTitle: downloadTitle)?.isHidden == false)
+        let installTitle = "更新并重新启动（aaaaaaaaaaaa）…"
+        try require(statusItem.menu.item(withTitle: installTitle)?.isHidden == false)
         try require(statusItem.menu.item(withTitle: "检查更新…")?.isEnabled == true)
-        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: downloadTitle))
-        try require(downloads == 1)
+        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: installTitle))
+        try require(installs == 1)
         statusItem.update(UpdateController.State.downloading(manifest))
         try require(statusItem.menu.item(withTitle: "正在下载更新…")?.isEnabled == false)
+        try require(statusItem.menu.item(withTitle: "检查更新…")?.isEnabled == false)
+        statusItem.update(UpdateController.State.installing)
+        try require(statusItem.menu.item(withTitle: "正在安装更新…")?.isEnabled == false)
         try require(statusItem.menu.item(withTitle: "检查更新…")?.isEnabled == false)
     }
 

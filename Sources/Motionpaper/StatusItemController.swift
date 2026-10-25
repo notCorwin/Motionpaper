@@ -10,9 +10,9 @@ final class StatusItemController: NSObject {
     let menu = NSMenu()
     private let errorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let updateItem = NSMenuItem(title: "检查更新…", action: nil, keyEquivalent: "")
-    private let downloadItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let installItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     var onCheckForUpdates: (@MainActor () -> Void)?
-    var onDownloadUpdate: (@MainActor () -> Void)?
+    var onInstallUpdate: (@MainActor () -> Void)?
 
     override init() {
         super.init()
@@ -41,10 +41,10 @@ final class StatusItemController: NSObject {
             updateItem.toolTip = "当前提交：\(commit.prefix(12))"
         }
         menu.addItem(updateItem)
-        downloadItem.target = self
-        downloadItem.action = #selector(downloadUpdate)
-        downloadItem.isHidden = true
-        menu.addItem(downloadItem)
+        installItem.target = self
+        installItem.action = #selector(installUpdate)
+        installItem.isHidden = true
+        menu.addItem(installItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出 Motionpaper", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
@@ -54,13 +54,13 @@ final class StatusItemController: NSObject {
     }
 
     @objc private func checkForUpdates() { onCheckForUpdates?() }
-    @objc private func downloadUpdate() { onDownloadUpdate?() }
+    @objc private func installUpdate() { onInstallUpdate?() }
 
     func update(_ state: UpdateController.State) {
         updateItem.isEnabled = true
         updateItem.title = "检查更新…"
-        downloadItem.isHidden = true
-        downloadItem.isEnabled = true
+        installItem.isHidden = true
+        installItem.isEnabled = true
         switch state {
         case .idle:
             break
@@ -68,13 +68,18 @@ final class StatusItemController: NSObject {
             updateItem.title = "正在检查更新…"
             updateItem.isEnabled = false
         case .available(let manifest):
-            downloadItem.isHidden = false
-            downloadItem.title = "下载更新（\(manifest.shortCommit)）…"
+            installItem.isHidden = false
+            installItem.title = "更新并重新启动（\(manifest.shortCommit)）…"
         case .downloading:
             updateItem.isEnabled = false
-            downloadItem.isHidden = false
-            downloadItem.title = "正在下载更新…"
-            downloadItem.isEnabled = false
+            installItem.isHidden = false
+            installItem.title = "正在下载更新…"
+            installItem.isEnabled = false
+        case .installing:
+            updateItem.isEnabled = false
+            installItem.isHidden = false
+            installItem.title = "正在安装更新…"
+            installItem.isEnabled = false
         }
     }
 
