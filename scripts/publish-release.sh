@@ -42,7 +42,10 @@ fi
 
 release_file="$work_dir/release.json"
 release_exists=false
-if gh api "repos/$repository/releases/tags/$commit" >"$release_file" 2>/dev/null; then
+# The tag endpoint omits unpublished drafts; the authenticated list includes them.
+gh api --paginate "repos/$repository/releases?per_page=100" \
+    --jq ".[] | select(.tag_name == \"$commit\")" >"$release_file"
+if [[ -s $release_file ]]; then
     release_exists=true
     release_tag=$(jq -r '.tag_name' "$release_file")
     release_target=$(jq -r '.target_commitish' "$release_file")
@@ -132,13 +135,12 @@ else
     fi
 
     if [[ $release_exists == false ]]; then
-        gh release create "$commit" \
-            --repo "$repository" \
-            --target "$commit" \
-            --title "$short_commit" \
-            --notes "Automated release for $default_branch commit $commit." \
-            --draft
-        gh api "repos/$repository/releases/tags/$commit" >"$release_file"
+        gh api --method POST "repos/$repository/releases" \
+            -f tag_name="$commit" \
+            -f target_commitish="$commit" \
+            -f name="$short_commit" \
+            -f body="Automated release for $default_branch commit $commit." \
+            -F draft=true >"$release_file"
     fi
 
     release_id=$(jq -r '.id' "$release_file")
