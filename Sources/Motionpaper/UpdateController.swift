@@ -30,7 +30,7 @@ final class UpdateController {
            let address = bundle.object(forInfoDictionaryKey: "MotionpaperUpdateURL") as? String,
            let url = URL(string: address),
            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            service = UpdateService(manifestURL: url, currentCommit: commit,
+            service = UpdateService(releaseURL: url, currentCommit: commit,
                                     directory: caches.appendingPathComponent("local.motionpaper.app/Updates", isDirectory: true))
         } else {
             service = nil
@@ -108,7 +108,7 @@ final class UpdateController {
                             requestedInstall = manifest
                         }
                     } else {
-                        showAlert("已是最新提交", "当前 Motionpaper 与最新 Release 一致。")
+                        showAlert("已是最新发布版本", "当前 Motionpaper 与 GitHub 最新发布的 Autobuild 一致。")
                     }
                 }
             } catch {

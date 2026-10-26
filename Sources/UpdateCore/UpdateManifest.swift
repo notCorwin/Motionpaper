@@ -1,6 +1,6 @@
 import Foundation
 
-public struct UpdateManifest: Codable, Equatable, Sendable {
+public struct UpdateManifest: Equatable, Sendable {
     public let commit: String
     public let publishedAt: Date
     public let downloadURL: URL
@@ -9,24 +9,67 @@ public struct UpdateManifest: Codable, Equatable, Sendable {
 
     public var shortCommit: String { String(commit.prefix(12)) }
 
-    public static func decode(_ data: Data, manifestURL: URL) throws -> Self {
+    public static func decode(_ data: Data, releaseURL: URL) throws -> Self {
         guard data.count <= 65_536 else { throw UpdateError.invalidManifest }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let manifest = try decoder.decode(Self.self, from: data)
-        let components = manifestURL.pathComponents
-        guard manifestURL.scheme == "https", manifestURL.host == "github.com",
-              manifestURL.user == nil, manifestURL.password == nil, manifestURL.port == nil,
-              manifestURL.query == nil, manifestURL.fragment == nil,
-              components.count == 7,
-              Array(components.suffix(4)) == ["releases", "latest", "download", "update.json"],
-              isHex(manifest.commit, count: 40), isHex(manifest.sha256, count: 64),
-              manifest.size > 0 else { throw UpdateError.invalidManifest }
+        let release = try decoder.decode(Release.self, from: data)
+        let components = releaseURL.pathComponents
+        guard components.count == 6, components[1] == "repos",
+              isRepositoryComponent(components[2]), isRepositoryComponent(components[3]),
+              Array(components.suffix(2)) == ["releases", "latest"],
+              releaseURL.absoluteString == "https://api.github.com/repos/\(components[2])/\(components[3])/releases/latest",
+              !release.draft, !release.prerelease,
+              release.tagName.hasPrefix("Autobuild-") else { throw UpdateError.invalidManifest }
 
-        // Bind downloads to the same repository and immutable commit as the feed.
-        let expected = "https://github.com/\(components[1])/\(components[2])/releases/download/Autobuild-\(manifest.commit)/Motionpaper-\(manifest.shortCommit).dmg"
-        guard manifest.downloadURL.absoluteString == expected else { throw UpdateError.invalidManifest }
-        return manifest
+        let commit = String(release.tagName.dropFirst("Autobuild-".count))
+        guard isHex(commit, count: 40) else { throw UpdateError.invalidManifest }
+        let name = "Motionpaper-\(commit.prefix(12)).dmg"
+        let assets = release.assets.filter { $0.name == name }
+        guard assets.count == 1, let asset = assets.first,
+              asset.state == "uploaded", asset.size > 0,
+              let digest = asset.digest, digest.hasPrefix("sha256:") else { throw UpdateError.invalidManifest }
+        let checksum = String(digest.dropFirst("sha256:".count))
+        let expected = "https://github.com/\(components[2])/\(components[3])/releases/download/\(release.tagName)/\(name)"
+        guard isHex(checksum, count: 64), asset.downloadURL.absoluteString == expected else {
+            throw UpdateError.invalidManifest
+        }
+        return Self(commit: commit, publishedAt: release.publishedAt, downloadURL: asset.downloadURL,
+                    sha256: checksum, size: asset.size)
+    }
+
+    private struct Release: Decodable {
+        let tagName: String
+        let publishedAt: Date
+        let draft: Bool
+        let prerelease: Bool
+        let assets: [Asset]
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case publishedAt = "published_at"
+            case draft, prerelease, assets
+        }
+    }
+
+    private struct Asset: Decodable {
+        let name: String
+        let state: String
+        let downloadURL: URL
+        let digest: String?
+        let size: Int64
+
+        enum CodingKeys: String, CodingKey {
+            case downloadURL = "browser_download_url"
+            case name, state, digest, size
+        }
+    }
+
+    private static func isRepositoryComponent(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".." && value.utf8.allSatisfy {
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0)
+                || $0 == 45 || $0 == 46 || $0 == 95
+        }
     }
 
     private static func isHex(_ value: String, count: Int) -> Bool {

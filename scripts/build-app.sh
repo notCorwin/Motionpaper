@@ -26,7 +26,7 @@ case "$motionpaper_repository" in
 esac
 
 motionpaper_repository_url="https://github.com/$motionpaper_repository"
-motionpaper_update_url="$motionpaper_repository_url/releases/latest/download/update.json"
+motionpaper_update_url="https://api.github.com/repos/$motionpaper_repository/releases/latest"
 swift build -c "$motionpaper_configuration" --arch arm64
 motionpaper_arm64_bin=$(swift build -c "$motionpaper_configuration" --arch arm64 --show-bin-path)
 swift build -c "$motionpaper_configuration" --arch x86_64

@@ -179,7 +179,7 @@ extension AppDelegate {
         }
         try require(url.scheme == "https" && url.host == "github.com" && url.pathComponents.count == 3)
         try require(Bundle.main.object(forInfoDictionaryKey: "MotionpaperUpdateURL") as? String
-                    == address + "/releases/latest/download/update.json")
+                    == "https://api.github.com/repos/\(url.pathComponents[1])/\(url.pathComponents[2])/releases/latest")
     }
 
     private func verifyUpdateMenu() throws {
@@ -206,11 +206,20 @@ extension AppDelegate {
         try require(statusItem.menu.item(withTitle: "正在检查更新…")?.isEnabled == false)
         let commit = String(repeating: "a", count: 40)
         let data = try JSONSerialization.data(withJSONObject: [
-            "commit": commit, "publishedAt": "2026-10-25T00:00:00Z",
-            "downloadURL": "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild-\(commit)/Motionpaper-aaaaaaaaaaaa.dmg",
-            "sha256": String(repeating: "b", count: 64), "size": 1,
+            "tag_name": "Autobuild-\(commit)",
+            "draft": false,
+            "prerelease": false,
+            "published_at": "2026-10-25T00:00:00Z",
+            "assets": [[
+                "name": "Motionpaper-aaaaaaaaaaaa.dmg",
+                "state": "uploaded",
+                "browser_download_url": "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild-\(commit)/Motionpaper-aaaaaaaaaaaa.dmg",
+                "size": 1,
+                "digest": "sha256:\(String(repeating: "b", count: 64))",
+            ]],
         ])
-        let manifest = try UpdateManifest.decode(data, manifestURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/latest/download/update.json")!)
+        let releaseURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest")!
+        let manifest = try UpdateManifest.decode(data, releaseURL: releaseURL)
         statusItem.update(UpdateController.State.available(manifest))
         let installTitle = "更新并重新启动（aaaaaaaaaaaa）…"
         try require(statusItem.menu.item(withTitle: installTitle)?.isHidden == false)

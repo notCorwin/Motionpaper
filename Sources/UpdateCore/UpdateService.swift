@@ -2,15 +2,15 @@ import CryptoKit
 import Foundation
 
 public actor UpdateService {
-    private let manifestURL: URL
+    private let releaseURL: URL
     private let currentCommit: String
     private let session: URLSession
     private let directory: URL
     private var checkRequest: Task<UpdateManifest?, any Error>?
     private var downloads: [String: Task<URL, any Error>] = [:]
 
-    public init(manifestURL: URL, currentCommit: String, directory: URL, session: URLSession = .shared) {
-        self.manifestURL = manifestURL
+    public init(releaseURL: URL, currentCommit: String, directory: URL, session: URLSession = .shared) {
+        self.releaseURL = releaseURL
         self.currentCommit = currentCommit
         self.directory = directory
         self.session = session
@@ -18,9 +18,11 @@ public actor UpdateService {
 
     public func check() async throws -> UpdateManifest? {
         if let checkRequest { return try await checkRequest.value }
-        let request = Task { [session, manifestURL, currentCommit] in
-            var request = URLRequest(url: manifestURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
-            request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let request = Task { [session, releaseURL, currentCommit] in
+            var request = URLRequest(url: releaseURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
+            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
             let (bytes, response) = try await session.bytes(for: request)
             try Self.validate(response)
             var data = Data()
@@ -28,7 +30,7 @@ public actor UpdateService {
                 guard data.count < 65_536 else { throw UpdateError.invalidManifest }
                 data.append(byte)
             }
-            let manifest = try UpdateManifest.decode(data, manifestURL: manifestURL)
+            let manifest = try UpdateManifest.decode(data, releaseURL: releaseURL)
             return manifest.commit == currentCommit ? nil : manifest
         }
         checkRequest = request
