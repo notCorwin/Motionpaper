@@ -43,7 +43,7 @@ extension AppDelegate {
                             return
                         }
                         guard ContinuousClock.now < deadline else {
-                            fputs("The update alert did not become visible and active\n", stderr)
+                            fputs("The update alert did not become visible and active; active=\(NSApp.isActive), foregroundPID=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)\n", stderr)
                             exit(1)
                         }
                         try? await Task.sleep(for: .milliseconds(10))

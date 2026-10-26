@@ -19,12 +19,19 @@ enum AlertOccluder {
         window.title = "Motionpaper alert verification"
         window.level = .floating
         window.center()
-        app.activate()
         window.makeKeyAndOrderFront(nil)
         let observer = FullScreenObserver()
         window.delegate = observer
         Task {
             do {
+                try Data().write(to: report.appendingPathExtension("occluder-started"))
+                // The harness activates this app through LaunchServices once it is registered.
+                let launchDeadline = ContinuousClock.now + .seconds(10)
+                while !FileManager.default.fileExists(atPath: report.appendingPathExtension("occluder-activated").path) {
+                    guard ContinuousClock.now < launchDeadline else { throw failure("LaunchServices did not activate the occluder") }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                try await waitForForeground()
                 app.yieldActivation(toApplicationWithBundleIdentifier: CommandLine.arguments[2])
                 try Data().write(to: report.appendingPathExtension("occluder-ready"))
                 let deadline = ContinuousClock.now + .seconds(10)
@@ -40,13 +47,7 @@ enum AlertOccluder {
                 app.activate()
                 window.makeKeyAndOrderFront(nil)
                 window.orderFrontRegardless()
-                let activationDeadline = ContinuousClock.now + .seconds(5)
-                while !app.isActive || NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
-                    guard ContinuousClock.now < activationDeadline else {
-                        throw failure("Occluder did not take foreground focus; active=\(app.isActive), foregroundPID=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)")
-                    }
-                    try await Task.sleep(for: .milliseconds(20))
-                }
+                try await waitForForeground()
                 try verifyOrdering(alertID: alertID, alertPID: alertPID, occluder: window)
 
                 window.level = .normal
@@ -57,7 +58,7 @@ enum AlertOccluder {
                     guard ContinuousClock.now < fullScreenDeadline else { throw failure("Occluder did not enter full screen") }
                     try await Task.sleep(for: .milliseconds(20))
                 }
-                try await Task.sleep(for: .milliseconds(300))
+                try await waitForForeground()
                 try verifyOrdering(alertID: alertID, alertPID: alertPID, occluder: window)
                 print("Alert stayed above another app's floating and full-screen windows after losing focus.")
                 app.terminate(nil)
@@ -67,6 +68,17 @@ enum AlertOccluder {
             }
         }
         app.run()
+    }
+
+    @MainActor
+    private static func waitForForeground() async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !NSApp.isActive || NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            guard ContinuousClock.now < deadline else {
+                throw failure("Occluder did not take foreground focus; active=\(NSApp.isActive), foregroundPID=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)")
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
     }
 
     @MainActor

@@ -44,22 +44,29 @@ def verify_termination(binary, root, quit_sender=None, occluder=None):
     process = occluder_process = None
     try:
         if occluder:
-            occluder_process = subprocess.Popen([str(occluder), str(report), bundle_identifier], stdout=subprocess.PIPE,
+            occluder_executable = occluder / "Contents" / "MacOS" / "AlertOccluder"
+            occluder_process = subprocess.Popen([str(occluder_executable), str(report), bundle_identifier], stdout=subprocess.PIPE,
                                                 stderr=subprocess.PIPE, text=True)
-            deadline = time.monotonic() + 5
-            while not report.with_suffix(".json.occluder-ready").exists():
-                if occluder_process.poll() is not None or time.monotonic() >= deadline:
-                    occluder_process.kill()
-                    stdout, stderr = occluder_process.communicate()
-                    raise RuntimeError(f"Occluder did not open: {stdout}\n{stderr}")
-                time.sleep(0.01)
+            for phase in ("started", "ready"):
+                deadline = time.monotonic() + 10
+                while not report.with_suffix(f".json.occluder-{phase}").exists():
+                    if occluder_process.poll() is not None or time.monotonic() >= deadline:
+                        occluder_process.kill()
+                        stdout, stderr = occluder_process.communicate()
+                        raise RuntimeError(f"Occluder did not become {phase}: {stdout}\n{stderr}")
+                    time.sleep(0.01)
+                if phase == "started":
+                    subprocess.run(["open", "-a", str(occluder)], check=True, timeout=10)
+                    report.with_suffix(".json.occluder-activated").touch()
             environment["MOTIONPAPER_VERIFICATION_FOREGROUND_PID"] = str(occluder_process.pid)
         process = subprocess.Popen(arguments, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if quit_sender:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 10
             while not report.exists():
                 if process.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError("App did not become ready for external termination")
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                    raise RuntimeError(f"App did not become ready for external termination: {stdout}\n{stderr}")
                 time.sleep(0.01)
             if occluder_process:
                 if json.loads(report.read_text()).get("alertVisible") is not True:
@@ -95,10 +102,16 @@ def main():
         fixture = Path(__file__).parent / "fixtures" / "QuitApplication.swift"
         subprocess.run(["xcrun", "swiftc", "-swift-version", "6", str(fixture), "-o", str(quit_sender)],
                        check=True, timeout=30)
-        occluder = root / "AlertOccluder"
+        occluder = root / "AlertOccluder.app"
+        occluder_contents = occluder / "Contents"
+        occluder_executable = occluder_contents / "MacOS" / "AlertOccluder"
+        occluder_executable.parent.mkdir(parents=True)
         subprocess.run(["xcrun", "swiftc", "-swift-version", "6", "-parse-as-library",
-                        str(Path(__file__).parent / "fixtures" / "AlertOccluder.swift"), "-o", str(occluder)],
+                        str(Path(__file__).parent / "fixtures" / "AlertOccluder.swift"), "-o", str(occluder_executable)],
                        check=True, timeout=30)
+        with (occluder_contents / "Info.plist").open("wb") as stream:
+            plistlib.dump({"CFBundleIdentifier": f"local.motionpaper.alert-occluder.{uuid.uuid4().hex}",
+                           "CFBundleExecutable": "AlertOccluder", "CFBundlePackageType": "APPL"}, stream)
         verify_termination(binary, root / "internal")
         verify_termination(binary, root / "external", quit_sender)
         verify_termination(binary, root / "external-alert", quit_sender, occluder=occluder)
