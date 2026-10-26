@@ -4,6 +4,8 @@ Motionpaper 是一个 Mac 小工具，让系统在解锁后也能播放动态墙
 
 [下载最新版](https://github.com/notCorwin/Motionpaper/releases/latest) · [反馈问题](https://github.com/notCorwin/Motionpaper/issues)
 
+https://github.com/user-attachments/assets/a7f37a3f-f820-462d-8bcb-70760ef02e4a
+
 ## 使用前确认
 
 | 项目 | 适用范围 |
