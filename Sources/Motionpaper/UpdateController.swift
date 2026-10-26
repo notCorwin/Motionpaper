@@ -1,4 +1,5 @@
 import AppKit
+import AppUI
 import OSLog
 import UpdateCore
 
@@ -240,9 +241,7 @@ private final class UpdateAlert: NSObject, NSWindowDelegate {
             button.target = self
             button.action = #selector(selectButton(_:))
         }
-        NSApp.activate()
-        alert.window.center()
-        alert.window.makeKeyAndOrderFront(nil)
+        AlertPresentation.show(alert)
     }
 
     @objc private func selectButton(_ button: NSButton) {

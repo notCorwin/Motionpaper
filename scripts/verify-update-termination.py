@@ -13,7 +13,7 @@ import time
 import uuid
 
 
-def verify_termination(binary, root, quit_sender=None, with_alert=False):
+def verify_termination(binary, root, quit_sender=None, occluder=None):
     contents = root / "Motionpaper.app" / "Contents"
     executable = contents / "MacOS" / "Motionpaper"
     executable.parent.mkdir(parents=True)
@@ -37,19 +37,35 @@ def verify_termination(binary, root, quit_sender=None, with_alert=False):
     arguments = [str(executable), "--verify-update-termination"]
     if quit_sender:
         arguments.append("--verify-external-termination")
-    if with_alert:
+    if occluder:
         arguments.append("--verify-alert-termination")
-    process = subprocess.Popen(arguments, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     report = root / "verification.json"
+    process = occluder_process = None
     try:
+        if occluder:
+            occluder_process = subprocess.Popen([str(occluder), str(report)], stdout=subprocess.PIPE,
+                                                stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + 5
+            while not report.with_suffix(".json.occluder-ready").exists():
+                if occluder_process.poll() is not None or time.monotonic() >= deadline:
+                    occluder_process.kill()
+                    stdout, stderr = occluder_process.communicate()
+                    raise RuntimeError(f"Occluder did not open: {stdout}\n{stderr}")
+                time.sleep(0.01)
+        process = subprocess.Popen(arguments, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if quit_sender:
             deadline = time.monotonic() + 5
             while not report.exists():
                 if process.poll() is not None or time.monotonic() >= deadline:
                     raise RuntimeError("App did not become ready for external termination")
                 time.sleep(0.01)
-            if with_alert and json.loads(report.read_text()).get("alertVisible") is not True:
-                raise RuntimeError("The external quit test did not show an update alert")
+            if occluder_process:
+                if json.loads(report.read_text()).get("alertVisible") is not True:
+                    raise RuntimeError("The external quit test did not show an update alert")
+                stdout, stderr = occluder_process.communicate(timeout=15)
+                if occluder_process.returncode != 0:
+                    raise RuntimeError(f"Alert ordering verification failed: {stdout}\n{stderr}")
+                print(stdout.strip())
             subprocess.run([str(quit_sender), str(process.pid)], check=True, timeout=10)
         try:
             stdout, stderr = process.communicate(timeout=10)
@@ -62,9 +78,11 @@ def verify_termination(binary, root, quit_sender=None, with_alert=False):
                 or result.get("pid") != process.pid):
             raise RuntimeError(f"App did not complete shutdown: {result}")
     finally:
-        if process.poll() is None:
-            process.kill()
-        process.communicate()
+        for running in (process, occluder_process):
+            if running:
+                if running.poll() is None:
+                    running.kill()
+                running.communicate()
 
 
 def main():
@@ -75,9 +93,13 @@ def main():
         fixture = Path(__file__).parent / "fixtures" / "QuitApplication.swift"
         subprocess.run(["xcrun", "swiftc", "-swift-version", "6", str(fixture), "-o", str(quit_sender)],
                        check=True, timeout=30)
+        occluder = root / "AlertOccluder"
+        subprocess.run(["xcrun", "swiftc", "-swift-version", "6", "-parse-as-library",
+                        str(Path(__file__).parent / "fixtures" / "AlertOccluder.swift"), "-o", str(occluder)],
+                       check=True, timeout=30)
         verify_termination(binary, root / "internal")
         verify_termination(binary, root / "external", quit_sender)
-        verify_termination(binary, root / "external-alert", quit_sender, with_alert=True)
+        verify_termination(binary, root / "external-alert", quit_sender, occluder=occluder)
     print("Update task completed AppKit termination and shutdown cleanup.")
     print("External quit completed successfully without reporting user cancellation.")
     print("External quit dismissed a pending update alert and completed shutdown.")

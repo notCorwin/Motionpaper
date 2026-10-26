@@ -10,11 +10,15 @@ extension AppDelegate {
     }
 
     func verifyUpdateTermination() {
-        func recordReady(alertVisible: Bool = false) throws {
-            let data = try JSONSerialization.data(withJSONObject: [
+        func recordReady(alert: NSWindow? = nil) throws {
+            var observations: [String: Any] = [
                 "phase": "readyToQuit", "pid": ProcessInfo.processInfo.processIdentifier,
-                "alertVisible": alertVisible,
-            ])
+                "alertVisible": alert?.isVisible == true,
+            ]
+            if let alert {
+                observations["alertWindowNumber"] = alert.windowNumber
+            }
+            let data = try JSONSerialization.data(withJSONObject: observations)
             try data.write(to: verificationOutput.appendingPathComponent("verification.json"), options: .atomic)
         }
         do {
@@ -24,15 +28,18 @@ extension AppDelegate {
                 updates.checkForUpdates()
                 Task {
                     let deadline = ContinuousClock.now + .seconds(5)
-                    while !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) {
+                    while true {
+                        if let alert = NSApp.windows.first(where: { $0.isVisible && $0.styleMask.contains(.titled) }) {
+                            do { try recordReady(alert: alert) }
+                            catch { exit(1) }
+                            return
+                        }
                         guard ContinuousClock.now < deadline else {
                             fputs("The update alert did not become visible\n", stderr)
                             exit(1)
                         }
                         try? await Task.sleep(for: .milliseconds(10))
                     }
-                    do { try recordReady(alertVisible: true) }
-                    catch { exit(1) }
                 }
                 return
             }

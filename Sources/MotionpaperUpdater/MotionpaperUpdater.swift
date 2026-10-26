@@ -1,4 +1,5 @@
 import AppKit
+import AppUI
 import Darwin
 import OSLog
 import UpdateCore
@@ -53,12 +54,11 @@ enum MotionpaperUpdater {
             logger.error("Installation failed: \(error.localizedDescription, privacy: .public)")
             let app = NSApplication.shared
             app.setActivationPolicy(.accessory)
-            app.activate()
             let alert = NSAlert()
             alert.messageText = "无法安装更新"
             alert.informativeText = error.localizedDescription
             alert.addButton(withTitle: "好")
-            alert.runModal()
+            AlertPresentation.runModal(alert)
         }
     }
 

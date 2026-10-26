@@ -1,4 +1,5 @@
 import AppKit
+import AppUI
 import PlaybackCore
 import QuartzCore
 import ServiceManagement
@@ -132,8 +133,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 alert.messageText = "无法更改随开机自动启动设置"
                 alert.informativeText = error.localizedDescription
                 alert.addButton(withTitle: "好")
-                NSApp.activate()
-                alert.runModal()
+                AlertPresentation.runModal(alert)
             }
         }
     }

@@ -1,4 +1,5 @@
 import AppKit
+import AppUI
 import Darwin
 import Dispatch
 import OSLog
@@ -67,8 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = "无法打开 GitHub 仓库"
         alert.informativeText = "请检查默认浏览器，或使用 GitHub Release 提供的应用。"
         alert.addButton(withTitle: "好")
-        NSApp.activate()
-        alert.runModal()
+        AlertPresentation.runModal(alert)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -115,7 +115,8 @@ enum MotionpaperApp {
            (try? UpdateInstaller.installationInProgress(application: Bundle.main.bundleURL)) == true {
             return
         }
-        application.setActivationPolicy(verifyingTermination ? .prohibited : .accessory)
+        let verifyingWithoutUI = verifyingTermination && !CommandLine.arguments.contains("--verify-alert-termination")
+        application.setActivationPolicy(verifyingWithoutUI ? .prohibited : .accessory)
         let delegate = AppDelegate()
         application.delegate = delegate
         withExtendedLifetime(delegate) { application.run() }
