@@ -42,7 +42,7 @@ private func stableRelease(version: String, commit: String = commit, checksum: S
                            additionalAssets: [[String: Any]] = []) -> [String: Any] {
     let tagName = tag ?? "v\(version)"
     let target = targetCommit ?? commit
-    let name = assetName ?? "Motionpaper-\(version)-\(String(target.prefix(12))).dmg"
+    let name = assetName ?? "Motionpaper-v\(version).dmg"
     let expectedDownload = "https://github.com/notCorwin/Motionpaper/releases/download/\(tagName)/\(name)"
     let asset: [String: Any] = [
         "name": name,
@@ -147,16 +147,17 @@ private func catalogJSON(_ releases: [Data]) throws -> Data {
     #expect(manifest.version?.description == "1.2.3")
     #expect(manifest.commit == commit)
     #expect(manifest.publishedAt == ISO8601DateFormatter().date(from: "2026-10-25T00:00:00Z"))
-    #expect(manifest.downloadURL.absoluteString == "https://github.com/notCorwin/Motionpaper/releases/download/v1.2.3/Motionpaper-1.2.3-aaaaaaaaaaaa.dmg")
+    #expect(manifest.downloadURL.absoluteString == "https://github.com/notCorwin/Motionpaper/releases/download/v1.2.3/Motionpaper-v1.2.3.dmg")
 
     for release in [
         stableRelease(version: "1.2.3", tag: "v1.2.3-rc.1"),
         stableRelease(version: "1.2.3", targetCommit: String(commit.prefix(12))),
         stableRelease(version: "1.2.3", targetCommit: String(repeating: "A", count: 40)),
         stableRelease(version: "1.2.3", assetDigest: "sha256:BAD"),
-        stableRelease(version: "1.2.3", download: "https://github.com/another/Motionpaper/releases/download/v1.2.3/Motionpaper-1.2.3-aaaaaaaaaaaa.dmg"),
-        stableRelease(version: "1.2.3", download: "https://github.com/notCorwin/Motionpaper/releases/download/v1.2.4/Motionpaper-1.2.3-aaaaaaaaaaaa.dmg"),
+        stableRelease(version: "1.2.3", download: "https://github.com/another/Motionpaper/releases/download/v1.2.3/Motionpaper-v1.2.3.dmg"),
+        stableRelease(version: "1.2.3", download: "https://github.com/notCorwin/Motionpaper/releases/download/v1.2.4/Motionpaper-v1.2.3.dmg"),
         stableRelease(version: "1.2.3", assetName: "Motionpaper-1.2.3.dmg"),
+        stableRelease(version: "1.2.3", assetName: "Motionpaper-v1.2.4.dmg"),
         stableRelease(version: "1.2.3", size: 0),
         stableRelease(version: "1.2.3", assetState: "uploading"),
         stableRelease(version: "1.2.3", publishedAt: "not-a-date"),

@@ -278,7 +278,7 @@ extension AppDelegate {
 
         let stableManifest = UpdateManifest(
             commit: String(repeating: "c", count: 40), publishedAt: Date(),
-            downloadURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/v1.0.0/Motionpaper-1.0.0-cccccccccccc.dmg")!,
+            downloadURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/v1.0.0/Motionpaper-v1.0.0.dmg")!,
             sha256: String(repeating: "d", count: 64), size: 1, version: ReleaseVersion("1.0.0")!
         )
         let stableTitle = "更新到正式版"
@@ -309,7 +309,7 @@ extension AppDelegate {
             let newerVersion = "1.2.3"
             let newerStable = UpdateManifest(
                 commit: stableManifest.commit, publishedAt: Date(),
-                downloadURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/v\(newerVersion)/Motionpaper-\(newerVersion)-cccccccccccc.dmg")!,
+                downloadURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/v\(newerVersion)/Motionpaper-v\(newerVersion).dmg")!,
                 sha256: stableManifest.sha256, size: stableManifest.size, version: ReleaseVersion(newerVersion)!
             )
             statusItem.updateStableRelease(newerStable)

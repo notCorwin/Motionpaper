@@ -67,7 +67,7 @@ private func releasesCatalog() throws -> Data {
     let autobuildTag = "Autobuild-\(autobuildCommit)"
     let autobuildName = "Motionpaper-\(autobuildCommit.prefix(12)).dmg"
     let stableTag = "v1.2.3"
-    let stableName = "Motionpaper-1.2.3-\(stableCommit.prefix(12)).dmg"
+    let stableName = "Motionpaper-v1.2.3.dmg"
     let releases: [[String: Any]] = [
         [
             "tag_name": autobuildTag,

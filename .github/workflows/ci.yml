@@ -20,7 +20,6 @@ jobs:
     timeout-minutes: 15
     outputs:
       commit: ${{ steps.target.outputs.commit }}
-      short_commit: ${{ steps.target.outputs.short_commit }}
       default_branch: ${{ steps.target.outputs.default_branch }}
       should_release: ${{ steps.target.outputs.should_release }}
       channel: ${{ steps.target.outputs.channel }}
@@ -66,14 +65,13 @@ jobs:
           elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || { [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ]; }; then
             should_release=true
           fi
-          short_commit=$(printf '%s' "$commit" | cut -c 1-12)
           if [ "$channel" = stable ]; then
-            dmg_name="Motionpaper-$version-$short_commit.dmg"
+            dmg_name="Motionpaper-v$version.dmg"
           else
+            short_commit=$(printf '%s' "$commit" | cut -c 1-12)
             dmg_name="Motionpaper-$short_commit.dmg"
           fi
           printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
-          printf 'short_commit=%s\n' "$short_commit" >> "$GITHUB_OUTPUT"
           printf 'default_branch=%s\n' "$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
           printf 'should_release=%s\n' "$should_release" >> "$GITHUB_OUTPUT"
           printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"

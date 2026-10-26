@@ -24,12 +24,12 @@ if [[ ! $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
     exit 1
 fi
 
-short_commit=${commit:0:12}
 if [[ $channel == stable ]]; then
     tag="v$version"
-    dmg_name="Motionpaper-$version-$short_commit.dmg"
+    dmg_name="Motionpaper-$tag.dmg"
 else
     tag="Autobuild-$commit"
+    short_commit=${commit:0:12}
     dmg_name="Motionpaper-$short_commit.dmg"
 fi
 dmg_path="dist/$dmg_name"
@@ -214,6 +214,17 @@ asset_metadata() {
         '[.assets[]? | select(.name == $name)][0][$field] // empty' "$json_file"
 }
 
+validate_stable_dmg_asset_names() {
+    local json_file=$1 stable_tag=$2 expected_dmg_name=$3 unexpected_dmg_names
+    unexpected_dmg_names=$(jq -r --arg expected "$expected_dmg_name" \
+        '[.assets[]? | select((.name | type) == "string" and (.name | test("\\.dmg$"; "i")) and .name != $expected) | .name] | unique | join(", ")' \
+        "$json_file")
+    [[ -z $unexpected_dmg_names ]] || {
+        echo "error: stable release $stable_tag contains non-standard DMG asset(s): $unexpected_dmg_names; expected only $expected_dmg_name" >&2
+        return 1
+    }
+}
+
 file_size() {
     wc -c <"$1" | tr -d '[:space:]'
 }
@@ -300,6 +311,9 @@ validate_uploaded_assets() {
     local update_count dmg_size dmg_digest
 
     validate_release_identity "$json_file" "$expected_tag" "$expected_commit" || return
+    if [[ $expected_channel == stable ]]; then
+        validate_stable_dmg_asset_names "$json_file" "$expected_tag" "$expected_dmg_name" || return
+    fi
     update_count=$(asset_count "$json_file" update.json)
     validate_asset_metadata "$json_file" "$expected_dmg_name" "$(asset_download_url "$expected_tag" "$expected_dmg_name")" || return
     if [[ $expected_channel == autobuild ]]; then
@@ -346,6 +360,9 @@ validate_published_release() {
     }
     assert_tag_target "$expected_tag" "$expected_commit" || return
 
+    if [[ $expected_channel == stable ]]; then
+        validate_stable_dmg_asset_names "$json_file" "$expected_tag" "$expected_dmg_name" || return
+    fi
     validate_asset_metadata "$json_file" "$expected_dmg_name" "$(asset_download_url "$expected_tag" "$expected_dmg_name")" || return
     dmg_size=$(asset_metadata "$json_file" "$expected_dmg_name" size)
     dmg_digest=$(asset_metadata "$json_file" "$expected_dmg_name" digest)
@@ -396,9 +413,8 @@ download_autobuild_manifest() {
 }
 
 validate_stable_release_for_sync() {
-    local json_file=$1 stable_tag=$2 stable_commit stable_version stable_dmg published is_draft
+    local json_file=$1 stable_tag=$2 stable_commit stable_dmg published is_draft
     [[ $stable_tag =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
-    stable_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
     stable_commit=$(jq -r '.target_commitish // empty' "$json_file")
     [[ $stable_commit =~ ^[0-9a-f]{40}$ ]] || {
         echo "error: stable release $stable_tag has an invalid commit target" >&2
@@ -412,13 +428,14 @@ validate_stable_release_for_sync() {
         return 1
     }
     assert_tag_target "$stable_tag" "$stable_commit" || return
-    stable_dmg="Motionpaper-$stable_version-${stable_commit:0:12}.dmg"
+    stable_dmg="Motionpaper-$stable_tag.dmg"
+    validate_stable_dmg_asset_names "$json_file" "$stable_tag" "$stable_dmg" || return
     validate_asset_metadata "$json_file" "$stable_dmg" "$(asset_download_url "$stable_tag" "$stable_dmg")"
 }
 
 sync_manifest_to_latest_stable() {
     local manifest_path=$1 attempt releases_file stable_row stable_id stable_tag
-    local stable_file stable_commit stable_version stable_dmg stable_dmg_id stable_dmg_size stable_dmg_digest stable_dmg_url
+    local stable_file stable_dmg stable_dmg_id stable_dmg_size stable_dmg_digest stable_dmg_url
     local updated_releases updated_row updated_tag manifest_size manifest_digest compat_count compat_size compat_digest compat_matches
     local stage_name stage_path stage_count stage_id stage_size stage_digest backup_prefix backup_count backup_id
     local backup_name synced_count synced_size synced_digest
@@ -436,9 +453,7 @@ sync_manifest_to_latest_stable() {
         gh api "repos/$repository/releases/$stable_id" >"$stable_file"
         validate_stable_release_for_sync "$stable_file" "$stable_tag"
 
-        stable_commit=$(jq -r '.target_commitish' "$stable_file")
-        stable_version=${stable_tag#v}
-        stable_dmg="Motionpaper-$stable_version-${stable_commit:0:12}.dmg"
+        stable_dmg="Motionpaper-$stable_tag.dmg"
         stable_dmg_id=$(asset_metadata "$stable_file" "$stable_dmg" id)
         stable_dmg_size=$(asset_metadata "$stable_file" "$stable_dmg" size)
         stable_dmg_digest=$(asset_metadata "$stable_file" "$stable_dmg" digest)
@@ -724,6 +739,9 @@ else
         exit 1
     }
     assert_tag_target "$tag" "$commit"
+    if [[ $channel == stable ]]; then
+        validate_stable_dmg_asset_names "$release_file" "$tag" "$dmg_name"
+    fi
     update_path=''
     dmg_validation_path=$dmg_path
     if [[ $channel == autobuild ]]; then

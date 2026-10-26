@@ -82,7 +82,7 @@ public struct UpdateManifest: Equatable, Sendable {
         }
 
         let commit = release.targetCommitish
-        let name = "Motionpaper-\(version)-\(commit.prefix(12)).dmg"
+        let name = "Motionpaper-v\(version).dmg"
         let assets = release.assets.filter { $0.name == name }
         guard assets.count == 1, let asset = assets.first,
               asset.state == "uploaded", asset.size > 0,

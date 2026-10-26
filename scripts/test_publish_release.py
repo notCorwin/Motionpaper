@@ -386,7 +386,7 @@ def asset(tag, name, content):
 
 def released(tag, commit, release_id, date, channel, version=None):
     if channel == "stable":
-        dmg_name = f"Motionpaper-{version}-{commit[:12]}.dmg"
+        dmg_name = f"Motionpaper-v{version}.dmg"
     else:
         dmg_name = f"Motionpaper-{commit[:12]}.dmg"
     dmg_content = f"fixture DMG for {tag}".encode()
@@ -429,7 +429,7 @@ class PublishReleaseTests(unittest.TestCase):
 
     def run_publish(self, state, commit, channel, version, dmg_content=b"package DMG fixture"):
         if channel == "stable":
-            dmg_name = f"Motionpaper-{version}-{commit[:12]}.dmg"
+            dmg_name = f"Motionpaper-v{version}.dmg"
         else:
             dmg_name = f"Motionpaper-{commit[:12]}.dmg"
         (self.dist / dmg_name).write_bytes(dmg_content)
@@ -486,7 +486,7 @@ class PublishReleaseTests(unittest.TestCase):
     def test_stable_draft_retry_reuses_uploaded_dmg_after_rebuild_changes_bytes(self):
         commit = "a" * 40
         tag = "v1.2.3"
-        dmg_name = f"Motionpaper-1.2.3-{commit[:12]}.dmg"
+        dmg_name = "Motionpaper-v1.2.3.dmg"
         original_dmg = b"first nondeterministic disk image"
         state = {
             "branches": {"master": "b" * 40},
@@ -521,10 +521,44 @@ class PublishReleaseTests(unittest.TestCase):
             for call in published["calls"][calls_before_retry:]
         ))
 
+    def test_stable_draft_rejects_legacy_named_dmg_before_upload_or_publish(self):
+        commit = "a" * 40
+        tag = "v1.2.3"
+        legacy_dmg_name = f"Motionpaper-1.2.3-{commit[:12]}.dmg"
+        draft = {
+            "id": 70,
+            "tag_name": tag,
+            "target_commitish": commit,
+            "draft": True,
+            "prerelease": False,
+            "published_at": None,
+            "assets": [asset(tag, legacy_dmg_name, b"existing legacy package")],
+        }
+        draft["assets"][0]["id"] = 701
+        state = {
+            "branches": {"master": "b" * 40},
+            "tags": {tag: {"type": "commit", "sha": commit}},
+            "releases": [draft],
+            "latest": "Autobuild-" + "c" * 40,
+        }
+
+        result, after = self.run_publish(state, commit, "stable", "1.2.3")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("non-standard DMG asset", result.stderr)
+        self.assertIn(legacy_dmg_name, result.stderr)
+        current = next(r for r in after["releases"] if r["tag_name"] == tag)
+        self.assertEqual(current["assets"], draft["assets"])
+        self.assertFalse(any(call[:2] == ["release", "upload"] for call in after["calls"]))
+        self.assertFalse(any(
+            "--method" in call and call[call.index("--method") + 1] in ("PATCH", "DELETE")
+            for call in after["calls"]
+        ))
+
     def test_new_stable_upload_rejects_api_metadata_that_does_not_match_local_dmg(self):
         commit = "1" * 40
         tag = "v1.0.1"
-        dmg_name = f"Motionpaper-1.0.1-{commit[:12]}.dmg"
+        dmg_name = "Motionpaper-v1.0.1.dmg"
         state = {
             "branches": {"master": "2" * 40},
             "tags": {tag: {"type": "commit", "sha": commit}},
@@ -548,7 +582,7 @@ class PublishReleaseTests(unittest.TestCase):
     def test_existing_stable_draft_rejects_tampered_downloaded_dmg(self):
         commit = "4" * 40
         tag = "v1.1.0"
-        dmg_name = f"Motionpaper-1.1.0-{commit[:12]}.dmg"
+        dmg_name = "Motionpaper-v1.1.0.dmg"
         draft_dmg = b"server accepted package bytes"
         draft = {
             "id": 71,
@@ -606,7 +640,7 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertEqual(published["latest"], stable_tag)
         self.assertEqual(published["last_release_request"]["body"], release_notes)
         self.assertEqual(published["last_release_request"]["make_latest"], "false")
-        self.assertEqual([a["name"] for a in release["assets"]], [f"Motionpaper-1.2.3-{commit[:12]}.dmg"])
+        self.assertEqual([a["name"] for a in release["assets"]], ["Motionpaper-v1.2.3.dmg"])
         self.assertTrue(all(call[0] != "release" or call[1] != "download" for call in published["calls"]))
         self.assertFalse(any("branches/" in " ".join(call) for call in published["calls"]))
         post = next(call for call in published["calls"] if "--method" in call and call[call.index("--method") + 1] == "POST")
@@ -648,7 +682,7 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertEqual(update_asset["content"], auto_update["content"])
         self.assertEqual(published["latest"], previous_latest)
         self.assertEqual([a["name"] for a in new_stable["assets"]], [
-            "Motionpaper-1.2.3-" + commit[:12] + ".dmg", "update.json",
+            "Motionpaper-v1.2.3.dmg", "update.json",
         ])
         self.assertFalse(any("make_latest=true" in call for call in published["calls"]))
 
@@ -734,7 +768,7 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(after["latest"], "v1.10.0")
         stable_110 = next(r for r in after["releases"] if r["tag_name"] == "v1.10.0")
-        self.assertEqual(stable_110["assets"][0]["name"], f"Motionpaper-1.10.0-{commit[:12]}.dmg")
+        self.assertEqual(stable_110["assets"][0]["name"], "Motionpaper-v1.10.0.dmg")
 
         backfill_commit = "3" * 40
         after["branches"]["master"] = "4" * 40
@@ -820,6 +854,30 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertFalse(any(call[:2] == ["release", "upload"] for call in after["calls"]))
         self.assertFalse(any(
             "--method" in call and call[call.index("--method") + 1] == "DELETE"
+            and "/releases/assets/" in " ".join(call)
+            for call in after["calls"]
+        ))
+
+    def test_autobuild_sync_rejects_nonstandard_dmg_on_published_stable_release(self):
+        commit = "e" * 40
+        state, _, _ = self.autobuild_sync_state(commit)
+        stable = next(r for r in state["releases"] if r["tag_name"] == "v1.0.0")
+        legacy_dmg_name = "Motionpaper-1.0.0-" + stable["target_commitish"][:12] + ".dmg"
+        unexpected = asset(stable["tag_name"], legacy_dmg_name, b"legacy published package")
+        unexpected["id"] = stable["id"] * 10 + 3
+        stable["assets"].append(unexpected)
+        original_assets = json.loads(json.dumps(stable["assets"]))
+
+        result, after = self.run_publish(state, commit, "autobuild", "1.0.0")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("non-standard DMG asset", result.stderr)
+        self.assertIn(legacy_dmg_name, result.stderr)
+        stable_after = next(r for r in after["releases"] if r["tag_name"] == stable["tag_name"])
+        self.assertEqual(stable_after["assets"], original_assets)
+        self.assertFalse(any(call[:2] == ["release", "upload"] for call in after["calls"]))
+        self.assertFalse(any(
+            "--method" in call and call[call.index("--method") + 1] in ("PATCH", "DELETE")
             and "/releases/assets/" in " ".join(call)
             for call in after["calls"]
         ))
@@ -953,6 +1011,35 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertTrue(any(
             "--method" in call and call[call.index("--method") + 1] == "PATCH"
             and "releases/52" in " ".join(call) and "make_latest=true" in call
+            for call in after["calls"]
+        ))
+
+    def test_published_stable_reuse_rejects_extra_legacy_named_dmg(self):
+        commit = "9" * 40
+        tag = "v1.0.0"
+        stable_release = released(tag, commit, 51, "2026-03-01T00:00:00Z", "stable", "1.0.0")
+        legacy_dmg_name = f"Motionpaper-1.0.0-{commit[:12]}.dmg"
+        stable_release["assets"].append(asset(tag, legacy_dmg_name, b"legacy published package"))
+        stable_release["assets"][-1]["id"] = 512
+        original_assets = json.loads(json.dumps(stable_release["assets"]))
+        state = {
+            "branches": {"master": "8" * 40},
+            "tags": {tag: {"type": "commit", "sha": commit}},
+            "releases": [stable_release],
+            "latest": "Autobuild-" + "7" * 40,
+        }
+
+        result, after = self.run_publish(state, commit, "stable", "1.0.0")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("non-standard DMG asset", result.stderr)
+        self.assertIn(legacy_dmg_name, result.stderr)
+        reused = next(r for r in after["releases"] if r["tag_name"] == tag)
+        self.assertEqual(reused["assets"], original_assets)
+        self.assertEqual(after["latest"], state["latest"])
+        self.assertFalse(any(call[:2] == ["release", "upload"] for call in after["calls"]))
+        self.assertFalse(any(
+            "--method" in call and call[call.index("--method") + 1] in ("PATCH", "DELETE")
             for call in after["calls"]
         ))
 

@@ -35,11 +35,11 @@ for motionpaper_component in "$motionpaper_major" "$motionpaper_minor" "$motionp
     [ "$motionpaper_component" = 0 ] || case "$motionpaper_component" in 0*) echo "error: app bundle has a leading-zero version component" >&2; exit 1 ;; esac
 done
 
-motionpaper_short_commit=$(printf '%s' "$motionpaper_commit" | cut -c 1-12)
 motionpaper_dist="$motionpaper_root/dist"
 if [ "$motionpaper_channel" = stable ]; then
-    motionpaper_dmg="$motionpaper_dist/Motionpaper-$motionpaper_version-$motionpaper_short_commit.dmg"
+    motionpaper_dmg="$motionpaper_dist/Motionpaper-v$motionpaper_version.dmg"
 else
+    motionpaper_short_commit=$(printf '%s' "$motionpaper_commit" | cut -c 1-12)
     motionpaper_dmg="$motionpaper_dist/Motionpaper-$motionpaper_short_commit.dmg"
 fi
 mkdir -p "$motionpaper_dist"
