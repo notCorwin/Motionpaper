@@ -27,5 +27,6 @@ let package = Package(
         .testTarget(name: "PlaybackCoreTests", dependencies: ["PlaybackCore"]),
         .testTarget(name: "UpdateCoreTests", dependencies: ["UpdateCore"]),
         .testTarget(name: "WallpaperCoreTests", dependencies: ["WallpaperCore"]),
+        .testTarget(name: "MotionpaperTests", dependencies: ["Motionpaper"]),
     ]
 )

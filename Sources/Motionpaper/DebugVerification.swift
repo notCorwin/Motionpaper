@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import ServiceManagement
 import UpdateCore
 
 extension AppDelegate {
@@ -68,13 +69,17 @@ extension AppDelegate {
                 .compactMap { $0[kCGWindowName as String] as? String }
             observations["windowTitles"] = titles
             let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
-            guard visibleItems.filter({ !$0.isSeparatorItem }).map(\.title) == ["检查更新…", "退出 Motionpaper"],
-                  visibleItems.allSatisfy({ $0.state == .off }),
+            statusItem.menuWillOpen(statusItem.menu)
+            guard visibleItems.filter({ !$0.isSeparatorItem }).map(\.title)
+                    == ["开机自动启动", "检查更新…", "打开 GitHub 仓库", "退出 Motionpaper"],
+                  visibleItems.filter({ $0.title != "开机自动启动" }).allSatisfy({ $0.state == .off }),
                   statusItem.symbolView.playbackEnabled,
                   titles.contains(StatusItemController.identifier),
                   let quit = visibleItems.last else {
-                throw NSError(domain: "MotionpaperVerification", code: 2, userInfo: [NSLocalizedDescriptionKey: "Expected automatic playback, update/quit actions, and stable CGWindow identity"])
+                throw NSError(domain: "MotionpaperVerification", code: 2, userInfo: [NSLocalizedDescriptionKey: "Expected automatic playback, login/repository/update/quit actions, and stable CGWindow identity"])
             }
+            try verifyApplicationMenu()
+            observations["applicationMenuVerified"] = true
             try verifyUpdateMenu()
             observations["updateMenuVerified"] = true
             try record("enabled")
@@ -107,6 +112,46 @@ extension AppDelegate {
             try? record("failed")
             NSApp.terminate(nil)
         }
+    }
+
+    private func verifyApplicationMenu() throws {
+        let originalOpen = statusItem.onOpenRepository
+        defer {
+            statusItem.onOpenRepository = originalOpen
+            statusItem.menuWillOpen(statusItem.menu)
+        }
+        func require(_ valid: Bool) throws {
+            guard valid else {
+                throw NSError(domain: "MotionpaperVerification", code: 5,
+                              userInfo: [NSLocalizedDescriptionKey: "Login item states or repository action are incorrect"])
+            }
+        }
+        let login = statusItem.menu.item(withTitle: "开机自动启动")
+        try require(login?.action != nil && login?.target === statusItem)
+        for (status, state) in [(SMAppService.Status.notRegistered, NSControl.StateValue.off),
+                                (.notFound, .off), (.enabled, .on), (.requiresApproval, .mixed)] {
+            statusItem.updateLaunchAtLogin(status)
+            try require(login?.state == state && login?.isEnabled == true)
+        }
+        statusItem.menuWillOpen(statusItem.menu)
+        let expected: NSControl.StateValue = switch SMAppService.mainApp.status {
+        case .enabled: .on
+        case .requiresApproval: .mixed
+        default: .off
+        }
+        try require(login?.state == expected)
+        var opens = 0
+        statusItem.onOpenRepository = { opens += 1 }
+        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: "打开 GitHub 仓库"))
+        try require(opens == 1)
+        guard let address = Bundle.main.object(forInfoDictionaryKey: "MotionpaperRepositoryURL") as? String,
+              let url = URL(string: address) else {
+            try require(false)
+            return
+        }
+        try require(url.scheme == "https" && url.host == "github.com" && url.pathComponents.count == 3)
+        try require(Bundle.main.object(forInfoDictionaryKey: "MotionpaperUpdateURL") as? String
+                    == address + "/releases/latest/download/update.json")
     }
 
     private func verifyUpdateMenu() throws {

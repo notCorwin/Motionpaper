@@ -11,6 +11,7 @@
     <key>CFBundleVersion</key><string>1</string>
     <key>MotionpaperCommit</key><string>pending-build</string>
     <key>MotionpaperUpdateURL</key><string>pending-build</string>
+    <key>MotionpaperRepositoryURL</key><string>pending-build</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>

@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
         statusItem.onCheckForUpdates = { [weak self] in self?.updates.checkForUpdates() }
         statusItem.onInstallUpdate = { [weak self] in self?.updates.installAvailableUpdate() }
+        statusItem.onOpenRepository = { [weak self] in self?.openRepository() }
         updates.onStateChange = { [weak self] state in self?.statusItem.update(state) }
         playback.onStateChange = { [weak self] state in
             guard let self else { return }
@@ -46,6 +47,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         #endif
         updates.start()
+    }
+
+    private func openRepository() {
+        if let address = Bundle.main.object(forInfoDictionaryKey: "MotionpaperRepositoryURL") as? String,
+           let url = URL(string: address), NSWorkspace.shared.open(url) {
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "无法打开 GitHub 仓库"
+        alert.informativeText = "请检查默认浏览器，或使用 GitHub Release 提供的应用。"
+        alert.addButton(withTitle: "好")
+        NSApp.activate()
+        alert.runModal()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

@@ -25,7 +25,8 @@ case "$motionpaper_repository" in
     *) echo "error: expected GITHUB_REPOSITORY in owner/repository form" >&2; exit 1 ;;
 esac
 
-motionpaper_update_url="https://github.com/$motionpaper_repository/releases/latest/download/update.json"
+motionpaper_repository_url="https://github.com/$motionpaper_repository"
+motionpaper_update_url="$motionpaper_repository_url/releases/latest/download/update.json"
 swift build -c "$motionpaper_configuration" --arch arm64
 motionpaper_arm64_bin=$(swift build -c "$motionpaper_configuration" --arch arm64 --show-bin-path)
 swift build -c "$motionpaper_configuration" --arch x86_64
@@ -42,6 +43,7 @@ chmod 755 "$motionpaper_executable" "$motionpaper_updater"
 cp Support/Info.plist "$motionpaper_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MotionpaperCommit $motionpaper_commit" "$motionpaper_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MotionpaperUpdateURL $motionpaper_update_url" "$motionpaper_app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :MotionpaperRepositoryURL $motionpaper_repository_url" "$motionpaper_app/Contents/Info.plist"
 if [ ! -f .build/icon-tools/GenerateIcon ] || [ Tools/GenerateIcon.swift -nt .build/icon-tools/GenerateIcon ]; then
     xcrun swiftc -swift-version 6 Tools/GenerateIcon.swift -o .build/icon-tools/GenerateIcon
 fi
