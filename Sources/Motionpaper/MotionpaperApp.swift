@@ -13,7 +13,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let updates = UpdateController()
     private let logger = Logger(subsystem: "local.motionpaper.app", category: "playback")
     private var termination: Task<Void, Never>?
-    private var readyToTerminate = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
@@ -26,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.onInstallUpdate = { [weak self] in self?.updates.installAvailableUpdate() }
         statusItem.onInstallStableRelease = { [weak self] in self?.updates.installStableRelease() }
         statusItem.onOpenRepository = { [weak self] in self?.openRepository() }
+        statusItem.onRetryPlayback = { [weak self] in self?.playback.setEnabled(true) }
         updates.onStateChange = { [weak self] state in self?.statusItem.update(state) }
         updates.onStableReleaseChange = { [weak self] manifest in self?.statusItem.updateStableRelease(manifest) }
         playback.onStateChange = { [weak self] state in
@@ -72,17 +72,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if readyToTerminate { return .terminateNow }
-        if termination != nil { return .terminateCancel }
+        if termination != nil { return .terminateLater }
         guard let cleanup = updates.stop() else { return .terminateNow }
         termination = Task {
             await cleanup.value
-            readyToTerminate = true
-            sender.terminate(nil)
+            sender.reply(toApplicationShouldTerminate: true)
         }
-        // terminateLater runs a nested AppKit loop that can strand MainActor tasks
-        // when termination itself was requested by the update task.
-        return .terminateCancel
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {

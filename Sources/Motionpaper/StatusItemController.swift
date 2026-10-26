@@ -22,6 +22,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     var onCheckForUpdates: (@MainActor () -> Void)?
     var onInstallUpdate: (@MainActor () -> Void)?
     var onInstallStableRelease: (@MainActor () -> Void)?
+    var onRetryPlayback: (@MainActor () -> Void)?
     var onOpenRepository: (@MainActor () -> Void)?
 
     override init() {
@@ -41,6 +42,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             symbolView.widthAnchor.constraint(equalToConstant: 20),
             symbolView.heightAnchor.constraint(equalToConstant: 18),
         ])
+        errorItem.target = self
+        errorItem.action = #selector(retryPlayback)
         errorItem.isEnabled = false
         errorItem.isHidden = true
         menu.autoenablesItems = false
@@ -94,6 +97,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func checkForUpdates() { onCheckForUpdates?() }
     @objc private func installUpdate() { onInstallUpdate?() }
     @objc private func installStableRelease() { onInstallStableRelease?() }
+    @objc private func retryPlayback() { onRetryPlayback?() }
     @objc private func openRepository() { onOpenRepository?() }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -179,6 +183,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let enabled = state == .enabled
         symbolView.setPlaybackEnabled(enabled)
         errorItem.isHidden = true
+        errorItem.isEnabled = false
+        errorItem.toolTip = nil
 
         let description: String
         switch state {
@@ -187,8 +193,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         case .enabled: description = "Motionpaper：正在播放"
         case .failed(let message):
             description = "Motionpaper：无法开始播放"
-            errorItem.title = "无法开始播放"
+            errorItem.title = "重试播放"
             errorItem.toolTip = message
+            errorItem.isEnabled = true
             errorItem.isHidden = false
         }
         statusItem.button?.toolTip = description

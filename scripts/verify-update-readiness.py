@@ -85,13 +85,14 @@ def make_transaction(root, application):
     return canonical_directory
 
 
-def launch_case(root, binary, fixture_directory, scenario, should_fail):
+def launch_case(root, binary, fixture_directory, scenario, should_fail, retry=False):
     application, executable = make_application(root, binary, scenario)
     transaction = make_transaction(root, application)
     verification_directory = root / f"verification-{scenario}"
     log = root / f"assertions-{scenario}.log"
     environment = dict(os.environ)
     environment.pop("MOTIONPAPER_ASSERTION_ACQUIRE_FAIL", None)
+    environment.pop("MOTIONPAPER_ASSERTION_ACQUIRE_FAIL_ONCE", None)
     environment.update(
         DYLD_FRAMEWORK_PATH=str(fixture_directory),
         MOTIONPAPER_ASSERTION_ACQUIRE_DELAY_SECONDS=str(ACQUIRE_DELAY_SECONDS),
@@ -100,11 +101,15 @@ def launch_case(root, binary, fixture_directory, scenario, should_fail):
     )
     if should_fail:
         environment["MOTIONPAPER_ASSERTION_ACQUIRE_FAIL"] = "1"
+    if retry:
+        environment["MOTIONPAPER_ASSERTION_ACQUIRE_FAIL_ONCE"] = "1"
 
     process_started_monotonic = time.clock_gettime(time.CLOCK_MONOTONIC)
     arguments = [
         str(executable), "--verify-update-launch", "--complete-update", str(transaction), COMMIT,
     ]
+    if retry:
+        arguments.append("--verify-playback-retry")
     process = subprocess.Popen(arguments, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True)
     try:
@@ -137,13 +142,15 @@ def launch_case(root, binary, fixture_directory, scenario, should_fail):
 
     if report.get("state") != "enabled":
         raise RuntimeError(f"Delayed fixture success did not reach enabled playback: {report}")
-    if [event[0] for event in events] != ["acquired", "released"]:
-        raise RuntimeError(f"Expected one acquired and one released assertion, got: {events}")
-    acquired_monotonic = float(events[0][1])
+    expected_events = ["failed", "acquired", "released"] if retry else ["acquired", "released"]
+    if [event[0] for event in events] != expected_events:
+        raise RuntimeError(f"Expected {expected_events}, got: {events}")
+    acquired = events[1] if retry else events[0]
+    acquired_monotonic = float(acquired[1])
     if acquired_monotonic - process_started_monotonic < ACQUIRE_DELAY_SECONDS - 0.5:
         raise RuntimeError(f"Fixture acquisition was not delayed as requested: {events[0]}")
 
-    acquired_unix_ns = int(events[0][2])
+    acquired_unix_ns = int(acquired[2])
     receipt_path = transaction / "launched.json"
     if not receipt_path.is_file():
         raise RuntimeError(
@@ -201,9 +208,11 @@ def main():
         fixture_directory = compile_fixture(root / "fixture")
         success = launch_case(root, binary, fixture_directory, "success", should_fail=False)
         failure = launch_case(root, binary, fixture_directory, "failure", should_fail=True)
+        launch_case(root, binary, fixture_directory, "retry", should_fail=False, retry=True)
         verify_channel_menus(root, binary, fixture_directory)
     print("Delayed successful playback wrote a matching update receipt only after acquisition.")
     print("Delayed failed playback exited cleanly without confirming the update launch.")
+    print("Playback recovered through the retry menu after one failed native acquisition.")
     print("Autobuild and stable menus have working update actions and no login checkmarks.")
     print(f"Reports: success={success['phase']}/{success['state']}, failure={failure['phase']}/{failure['state']}")
 

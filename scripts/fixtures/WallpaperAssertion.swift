@@ -12,18 +12,22 @@ open class AssertionBase {
 
 @MainActor
 public class WallpaperPresentationModeAssertion: AssertionBase {
+    private static var attempts = 0
+
     public required override init() {
         super.init()
         record("acquired")
     }
 
     public class func takeIdleAssertion() async throws -> Self {
+        attempts += 1
         if let delay = getenv("MOTIONPAPER_ASSERTION_ACQUIRE_DELAY_SECONDS"),
            let seconds = Double(String(cString: delay)), seconds > 0 {
             try await Task.sleep(for: .seconds(seconds))
         }
-        if let failure = getenv("MOTIONPAPER_ASSERTION_ACQUIRE_FAIL"),
-           String(cString: failure) == "1" {
+        let failAlways = getenv("MOTIONPAPER_ASSERTION_ACQUIRE_FAIL").map { String(cString: $0) == "1" } ?? false
+        let failOnce = getenv("MOTIONPAPER_ASSERTION_ACQUIRE_FAIL_ONCE").map { String(cString: $0) == "1" } ?? false
+        if failAlways || (failOnce && attempts == 1) {
             record("failed")
             throw AssertionFixtureError.requestedFailure
         }

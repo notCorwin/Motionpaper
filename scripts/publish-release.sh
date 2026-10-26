@@ -189,11 +189,16 @@ assert_tag_target() {
 }
 
 validate_release_identity() {
-    local json_file=$1 expected_tag=$2 expected_commit=$3 actual_tag actual_target
+    local json_file=$1 expected_tag=$2 expected_commit=$3 actual_tag actual_target prerelease
     actual_tag=$(jq -r '.tag_name // empty' "$json_file")
     actual_target=$(jq -r '.target_commitish // empty' "$json_file")
+    prerelease=$(jq -r '.prerelease // false' "$json_file")
     [[ $actual_tag == "$expected_tag" && $actual_target =~ ^[0-9a-f]{40}$ && $actual_target == "$expected_commit" ]] || {
         echo "error: release $expected_tag must name the expected tag and full commit target" >&2
+        return 1
+    }
+    [[ $prerelease == false ]] || {
+        echo "error: release $expected_tag is marked as a prerelease" >&2
         return 1
     }
 }
@@ -215,6 +220,18 @@ file_size() {
 
 file_sha256() {
     shasum -a 256 "$1" | cut -d ' ' -f 1
+}
+
+validate_asset_file() {
+    local json_file=$1 asset_name=$2 file_path=$3 uploaded_size uploaded_digest local_size local_digest
+    uploaded_size=$(asset_metadata "$json_file" "$asset_name" size)
+    uploaded_digest=$(asset_metadata "$json_file" "$asset_name" digest)
+    local_size=$(file_size "$file_path")
+    local_digest=$(file_sha256 "$file_path")
+    [[ $uploaded_size == "$local_size" && $uploaded_digest == "sha256:$local_digest" ]] || {
+        echo "error: release asset $asset_name size or SHA-256 does not match its uploaded bytes" >&2
+        return 1
+    }
 }
 
 validate_legacy_manifest() {
@@ -280,7 +297,7 @@ validate_update_manifest() {
 validate_uploaded_assets() {
     local json_file=$1 expected_tag=$2 expected_commit=$3 expected_channel=$4
     local expected_dmg_name=$5 expected_url=$6 expected_dmg_path=$7 update_path=${8:-}
-    local update_count uploaded_size uploaded_digest local_size local_digest dmg_size dmg_digest
+    local update_count dmg_size dmg_digest
 
     validate_release_identity "$json_file" "$expected_tag" "$expected_commit" || return
     update_count=$(asset_count "$json_file" update.json)
@@ -299,32 +316,18 @@ validate_uploaded_assets() {
         [[ $update_count == 0 ]] || { echo "error: stable release has an unverified update.json asset" >&2; return 1; }
     fi
 
-    uploaded_size=$(asset_metadata "$json_file" "$expected_dmg_name" size)
-    uploaded_digest=$(asset_metadata "$json_file" "$expected_dmg_name" digest)
-    local_size=$(file_size "$expected_dmg_path")
-    local_digest=$(file_sha256 "$expected_dmg_path")
-    dmg_size=$local_size
-    dmg_digest=$local_digest
-    [[ $uploaded_size == "$local_size" && $uploaded_digest == "sha256:$local_digest" ]] || {
-        echo "error: uploaded DMG size or SHA-256 does not match the package" >&2
-        return 1
-    }
+    validate_asset_file "$json_file" "$expected_dmg_name" "$expected_dmg_path" || return
+    dmg_size=$(file_size "$expected_dmg_path")
+    dmg_digest="sha256:$(file_sha256 "$expected_dmg_path")"
 
     if [[ $expected_channel == autobuild || -n $update_path ]]; then
-        uploaded_size=$(asset_metadata "$json_file" update.json size)
-        uploaded_digest=$(asset_metadata "$json_file" update.json digest)
-        local_size=$(file_size "$update_path")
-        local_digest=$(file_sha256 "$update_path")
-        [[ $uploaded_size == "$local_size" && $uploaded_digest == "sha256:$local_digest" ]] || {
-            echo "error: uploaded update.json size or SHA-256 does not match the manifest" >&2
-            return 1
-        }
+        validate_asset_file "$json_file" update.json "$update_path" || return
         validate_asset_metadata "$json_file" update.json "$(asset_download_url "$expected_tag" update.json)" || return
         if [[ $expected_channel == stable ]]; then
             validate_legacy_manifest "$update_path"
             return
         fi
-        validate_update_manifest "$update_path" "$expected_commit" "$expected_url" "$dmg_size" "sha256:$dmg_digest"
+        validate_update_manifest "$update_path" "$expected_commit" "$expected_url" "$dmg_size" "$dmg_digest"
     fi
 }
 
@@ -416,7 +419,9 @@ validate_stable_release_for_sync() {
 sync_manifest_to_latest_stable() {
     local manifest_path=$1 attempt releases_file stable_row stable_id stable_tag
     local stable_file stable_commit stable_version stable_dmg stable_dmg_id stable_dmg_size stable_dmg_digest stable_dmg_url
-    local asset_id updated_releases updated_row updated_tag manifest_size manifest_digest compat_count compat_size compat_digest compat_matches
+    local updated_releases updated_row updated_tag manifest_size manifest_digest compat_count compat_size compat_digest compat_matches
+    local stage_name stage_path stage_count stage_id stage_size stage_digest backup_prefix backup_count backup_id
+    local backup_name synced_count synced_size synced_digest
 
     for attempt in 1 2; do
         releases_file="$work_dir/sync-releases-$attempt.json"
@@ -445,19 +450,138 @@ sync_manifest_to_latest_stable() {
 
         manifest_size=$(file_size "$manifest_path")
         manifest_digest="sha256:$(file_sha256 "$manifest_path")"
+        stage_name="update.json.staging-${manifest_digest#sha256:}"
+        stage_path="$work_dir/$stage_name"
+        cp "$manifest_path" "$stage_path"
         compat_count=$(asset_count "$stable_file" update.json)
         compat_size=$(asset_metadata "$stable_file" update.json size)
         compat_digest=$(asset_metadata "$stable_file" update.json digest)
+        backup_prefix="update.json.backup-"
+        backup_count=$(jq --arg prefix "$backup_prefix" '[.assets[]? | select(.name | startswith($prefix))] | length' "$stable_file")
         compat_matches=false
         if [[ $compat_count == 1 && $compat_size == "$manifest_size" && $compat_digest == "$manifest_digest" ]] &&
             validate_asset_metadata "$stable_file" update.json "$(asset_download_url "$stable_tag" update.json)" >/dev/null 2>&1; then
             compat_matches=true
         fi
-        if [[ $compat_matches != true ]]; then
+        if [[ $compat_count == 1 && $backup_count -gt 0 ]]; then
             while IFS= read -r asset_id; do
                 [[ -n $asset_id ]] && gh api --method DELETE "repos/$repository/releases/assets/$asset_id"
-            done < <(jq -r '.assets[]? | select(.name == "update.json") | .id' "$stable_file")
-            gh release upload "$stable_tag" "$manifest_path" --repo "$repository"
+            done < <(jq -r --arg prefix "$backup_prefix" '.assets[]? | select(.name | startswith($prefix)) | .id' "$stable_file")
+            gh api "repos/$repository/releases/$stable_id" >"$stable_file"
+            backup_count=0
+        fi
+        if [[ $compat_matches == true ]]; then
+            while IFS= read -r stage_id; do
+                [[ -n $stage_id ]] && gh api --method DELETE "repos/$repository/releases/assets/$stage_id"
+            done < <(jq -r --arg name "$stage_name" '.assets[]? | select(.name == $name) | .id' "$stable_file")
+        fi
+        if [[ $compat_matches != true ]]; then
+            [[ $compat_count -le 1 ]] || {
+                echo "error: stable release $stable_tag has duplicate update.json assets" >&2
+                return 1
+            }
+
+            # A prior run may have stopped after moving the old asset aside.
+            # Restore it first so every retry starts with the published contract name present.
+            if [[ $compat_count == 0 && $backup_count == 1 ]]; then
+                backup_id=$(jq -r --arg prefix "$backup_prefix" '.assets[] | select(.name | startswith($prefix)) | .id' "$stable_file")
+                if ! gh api --method PATCH "repos/$repository/releases/assets/$backup_id" \
+                    -f "name=update.json" >"$work_dir/restore-stable-manifest.json"; then
+                    echo "error: could not restore the previous stable compatibility manifest" >&2
+                    return 1
+                fi
+                gh api "repos/$repository/releases/$stable_id" >"$stable_file"
+                compat_count=$(asset_count "$stable_file" update.json)
+                [[ $compat_count == 1 ]] || {
+                    echo "error: previous stable compatibility manifest was not restored" >&2
+                    return 1
+                }
+                compat_matches=false
+                backup_count=0
+            elif [[ $compat_count == 0 && $backup_count -gt 1 ]]; then
+                echo "error: stable release $stable_tag has multiple compatibility manifest backups" >&2
+                return 1
+            fi
+
+            # Reuse a stage accepted by GitHub even when the upload command lost its response.
+            stage_count=$(asset_count "$stable_file" "$stage_name")
+            if [[ $stage_count == 0 ]]; then
+                gh release upload "$stable_tag" "$stage_path" --repo "$repository"
+                gh api "repos/$repository/releases/$stable_id" >"$stable_file"
+                stage_count=$(asset_count "$stable_file" "$stage_name")
+            fi
+            [[ $stage_count == 1 ]] || {
+                echo "error: stable release $stable_tag does not contain exactly one staged compatibility manifest" >&2
+                return 1
+            }
+            stage_size=$(asset_metadata "$stable_file" "$stage_name" size)
+            stage_digest=$(asset_metadata "$stable_file" "$stage_name" digest)
+            validate_asset_metadata "$stable_file" "$stage_name" "$(asset_download_url "$stable_tag" "$stage_name")" || return
+            [[ $stage_size == "$manifest_size" && $stage_digest == "$manifest_digest" ]] || {
+                echo "error: staged stable compatibility manifest does not match the requested manifest" >&2
+                return 1
+            }
+
+            # Keep the old asset recoverable while the staged asset takes its public name.
+            backup_id=''
+            if [[ $compat_count == 1 ]]; then
+                backup_id=$(asset_metadata "$stable_file" update.json id)
+                backup_name="${backup_prefix}${backup_id}"
+                if ! gh api --method PATCH "repos/$repository/releases/assets/$backup_id" \
+                    -f "name=$backup_name" >"$work_dir/backup-stable-manifest.json"; then
+                    # GitHub may have applied the rename before the response was lost.
+                    if ! gh api --method PATCH "repos/$repository/releases/assets/$backup_id" \
+                        -f "name=update.json" >"$work_dir/rollback-stable-manifest.json"; then
+                        echo "error: could not confirm the old manifest rename; previous manifest remains recoverable as asset $backup_id" >&2
+                        return 1
+                    fi
+                    echo "error: could not back up the stable compatibility manifest; restored the previous manifest" >&2
+                    return 1
+                fi
+            fi
+
+            stage_id=$(asset_metadata "$stable_file" "$stage_name" id)
+            if ! gh api --method PATCH "repos/$repository/releases/assets/$stage_id" \
+                -f "name=update.json" >"$work_dir/rename-staged-manifest.json"; then
+                # A failed response may still mean GitHub applied the rename. Inspect before rollback.
+                synced_count=0
+                synced_size=''
+                synced_digest=''
+                if gh api "repos/$repository/releases/$stable_id" >"$stable_file"; then
+                    synced_count=$(asset_count "$stable_file" update.json)
+                    synced_size=$(asset_metadata "$stable_file" update.json size)
+                    synced_digest=$(asset_metadata "$stable_file" update.json digest)
+                fi
+                if [[ $synced_count == 1 && $synced_size == "$manifest_size" && $synced_digest == "$manifest_digest" ]]; then
+                    : # The rename succeeded remotely despite the lost response.
+                elif [[ -n $backup_id ]]; then
+                    if ! gh api --method PATCH "repos/$repository/releases/assets/$backup_id" \
+                        -f "name=update.json" >"$work_dir/rollback-stable-manifest.json"; then
+                        echo "error: replacement failed and the previous stable manifest remains recoverable as $backup_name" >&2
+                        return 1
+                    fi
+                    echo "error: could not rename the staged stable compatibility manifest; restored the previous manifest" >&2
+                    return 1
+                else
+                    echo "error: could not rename the staged stable compatibility manifest" >&2
+                    return 1
+                fi
+            fi
+
+            gh api "repos/$repository/releases/$stable_id" >"$stable_file"
+            synced_count=$(asset_count "$stable_file" update.json)
+            synced_size=$(asset_metadata "$stable_file" update.json size)
+            synced_digest=$(asset_metadata "$stable_file" update.json digest)
+            [[ $synced_count == 1 && $synced_size == "$manifest_size" && $synced_digest == "$manifest_digest" ]] || {
+                echo "error: stable compatibility manifest replacement failed validation" >&2
+                return 1
+            }
+            validate_asset_metadata "$stable_file" update.json "$(asset_download_url "$stable_tag" update.json)" || return
+
+            # Cleanup happens only after the new public name and content are verified.
+            if [[ -n $backup_id ]]; then
+                gh api --method DELETE "repos/$repository/releases/assets/$backup_id"
+            fi
         fi
 
         gh api "repos/$repository/releases/$stable_id" >"$work_dir/synced-stable.json"
@@ -601,6 +725,7 @@ else
     }
     assert_tag_target "$tag" "$commit"
     update_path=''
+    dmg_validation_path=$dmg_path
     if [[ $channel == autobuild ]]; then
         while IFS= read -r asset_id; do
             [[ -n $asset_id ]] && gh api --method DELETE "repos/$repository/releases/assets/$asset_id"
@@ -636,13 +761,11 @@ else
             gh release upload "$tag" "$dmg_path" --repo "$repository"
         elif [[ $dmg_count == 1 ]]; then
             validate_asset_metadata "$release_file" "$dmg_name" "$(asset_download_url "$tag" "$dmg_name")"
-            existing_dmg_size=$(asset_metadata "$release_file" "$dmg_name" size)
-            existing_dmg_digest=$(asset_metadata "$release_file" "$dmg_name" digest)
-            [[ $existing_dmg_size == "$(file_size "$dmg_path")" &&
-               $existing_dmg_digest == "sha256:$(file_sha256 "$dmg_path")" ]] || {
-                echo "error: refusing to replace the existing stable DMG asset" >&2
-                exit 1
-            }
+            mkdir -p "$work_dir/existing-stable-dmg"
+            dmg_validation_path="$work_dir/existing-stable-dmg/$dmg_name"
+            gh release download "$tag" --repo "$repository" --pattern "$dmg_name" \
+                --dir "$work_dir/existing-stable-dmg" --clobber
+            validate_asset_file "$release_file" "$dmg_name" "$dmg_validation_path"
         else
             echo "error: stable draft $tag contains duplicate DMG assets" >&2
             exit 1
@@ -658,7 +781,7 @@ else
 
     gh api "repos/$repository/releases/$release_id" >"$work_dir/uploaded.json"
     validate_uploaded_assets \
-        "$work_dir/uploaded.json" "$tag" "$commit" "$channel" "$dmg_name" "$download_url" "$dmg_path" "$update_path"
+        "$work_dir/uploaded.json" "$tag" "$commit" "$channel" "$dmg_name" "$download_url" "$dmg_validation_path" "$update_path"
     assert_tag_target "$tag" "$commit"
 
     if [[ $channel == autobuild ]] && ! is_current_default_head; then

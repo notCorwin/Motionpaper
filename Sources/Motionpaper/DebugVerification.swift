@@ -10,14 +10,37 @@ extension AppDelegate {
     }
 
     func verifyUpdateTermination() {
+        func recordReady(alertVisible: Bool = false) throws {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "phase": "readyToQuit", "pid": ProcessInfo.processInfo.processIdentifier,
+                "alertVisible": alertVisible,
+            ])
+            try data.write(to: verificationOutput.appendingPathComponent("verification.json"), options: .atomic)
+        }
         do {
             try FileManager.default.createDirectory(at: verificationOutput, withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: ["phase": "readyToQuit"])
-            try data.write(to: verificationOutput.appendingPathComponent("verification.json"), options: .atomic)
             updates.start()
+            if CommandLine.arguments.contains("--verify-alert-termination") {
+                updates.checkForUpdates()
+                Task {
+                    let deadline = ContinuousClock.now + .seconds(5)
+                    while !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) {
+                        guard ContinuousClock.now < deadline else {
+                            fputs("The update alert did not become visible\n", stderr)
+                            exit(1)
+                        }
+                        try? await Task.sleep(for: .milliseconds(10))
+                    }
+                    do { try recordReady(alertVisible: true) }
+                    catch { exit(1) }
+                }
+                return
+            }
+            try recordReady()
+            if CommandLine.arguments.contains("--verify-external-termination") { return }
             // Keep real asynchronous cleanup pending when the update task asks AppKit to quit.
             guard updates.stop() != nil else { throw UpdateError.installerUnavailable }
-            Task { NSApp.terminate(nil) }
+            RunLoop.main.perform { MainActor.assumeIsolated { NSApp.terminate(nil) } }
         } catch {
             fputs("Unable to verify update termination: \(error)\n", stderr)
             exit(1)
@@ -25,10 +48,31 @@ extension AppDelegate {
     }
 
     func verifyUpdateLaunch() async {
-        let deadline = ContinuousClock.now + .seconds(10)
         do {
+            var deadline = ContinuousClock.now + .seconds(10)
             while playback.state == .starting, ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(20))
+            }
+            if CommandLine.arguments.contains("--verify-playback-retry") {
+                guard case .failed = playback.state,
+                      let retry = statusItem.menu.item(withTitle: "重试播放"),
+                      retry.isEnabled, !retry.isHidden else {
+                    throw NSError(domain: "MotionpaperVerification", code: 6,
+                                  userInfo: [NSLocalizedDescriptionKey: "Playback failure did not offer retry"])
+                }
+                statusItem.menu.performActionForItem(at: statusItem.menu.index(of: retry))
+                guard playback.state == .starting, retry.isHidden, !retry.isEnabled else {
+                    throw NSError(domain: "MotionpaperVerification", code: 7,
+                                  userInfo: [NSLocalizedDescriptionKey: "Retry did not restart native playback acquisition"])
+                }
+                deadline = ContinuousClock.now + .seconds(10)
+                while playback.state == .starting, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                guard playback.state == .enabled, retry.isHidden, !retry.isEnabled else {
+                    throw NSError(domain: "MotionpaperVerification", code: 8,
+                                  userInfo: [NSLocalizedDescriptionKey: "Playback did not recover after retry"])
+                }
             }
             try FileManager.default.createDirectory(at: verificationOutput, withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: [
@@ -143,8 +187,11 @@ extension AppDelegate {
 
     private func verifyApplicationMenu() throws {
         let originalOpen = statusItem.onOpenRepository
+        let originalRetry = statusItem.onRetryPlayback
         defer {
             statusItem.onOpenRepository = originalOpen
+            statusItem.onRetryPlayback = originalRetry
+            statusItem.update(playback.state)
             statusItem.menuWillOpen(statusItem.menu)
         }
         func require(_ valid: Bool) throws {
@@ -174,6 +221,20 @@ extension AppDelegate {
         statusItem.onOpenRepository = { opens += 1 }
         statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: "打开 GitHub 仓库"))
         try require(opens == 1)
+
+        var retries = 0
+        statusItem.onRetryPlayback = { retries += 1 }
+        let diagnostic = "Native playback acquisition failed"
+        statusItem.update(.failed(diagnostic))
+        guard let retryItem = statusItem.menu.item(withTitle: "重试播放") else {
+            try require(false)
+            return
+        }
+        try require(!retryItem.isHidden && retryItem.isEnabled && retryItem.action != nil
+                    && retryItem.target === statusItem && retryItem.toolTip == diagnostic)
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: retryItem))
+        try require(retries == 1)
+
         guard let address = Bundle.main.object(forInfoDictionaryKey: "MotionpaperRepositoryURL") as? String,
               let url = URL(string: address) else {
             try require(false)

@@ -26,6 +26,7 @@ final class UpdateController {
     private var automaticCheck: Task<Void, Never>?
     private var stopping = false
     private var shutdown: Task<Void, Never>?
+    private var pendingAlert: UpdateAlert?
     private let logger = Logger(subsystem: "local.motionpaper.app", category: "updates")
 
     init(service: UpdateService, channel: UpdateChannel) {
@@ -86,6 +87,7 @@ final class UpdateController {
         let stable = stableCheck
         stable?.cancel()
         stableCheck = nil
+        pendingAlert?.dismiss()
         guard checks != nil || pending != nil || stable != nil else { return nil }
         let shutdown = Task { [service] in
             await service?.cancel()
@@ -100,7 +102,13 @@ final class UpdateController {
     private func check(userInitiated: Bool) {
         guard !stopping, operation == nil else { return }
         guard let service else {
-            if userInitiated { showAlert("无法检查更新", "请使用构建脚本或 GitHub Release 提供的应用。") }
+            if userInitiated {
+                operation = Task { [weak self] in
+                    guard let self else { return }
+                    defer { operation = nil }
+                    await showAlert("无法检查更新", "请使用构建脚本或 GitHub Release 提供的应用。")
+                }
+            }
             return
         }
         checkStableRelease()
@@ -124,13 +132,12 @@ final class UpdateController {
                         alert.informativeText = "下载完成后将自动安装并重新启动 Motionpaper。"
                         alert.addButton(withTitle: "更新并重新启动")
                         alert.addButton(withTitle: "稍后")
-                        NSApp.activate()
-                        if alert.runModal() == .alertFirstButtonReturn, !Task.isCancelled, !stopping {
+                        if await presentAlert(alert) == .alertFirstButtonReturn, !Task.isCancelled, !stopping {
                             requestedInstall = manifest
                         }
                     } else {
                         let release = channel == .stable ? "正式版" : "Autobuild"
-                        showAlert("已是最新发布版本", "当前 Motionpaper 已是最新发布的\(release)。")
+                        await showAlert("已是最新发布版本", "当前 Motionpaper 已是最新发布的\(release)。")
                     }
                 }
             } catch {
@@ -138,7 +145,7 @@ final class UpdateController {
                 availableUpdate = nil
                 state = .idle
                 logger.error("Update check failed: \(error.localizedDescription, privacy: .public)")
-                if userInitiated { showAlert("无法检查更新", error.localizedDescription) }
+                if userInitiated { await showAlert("无法检查更新", error.localizedDescription) }
             }
         }
     }
@@ -183,21 +190,75 @@ final class UpdateController {
                 try await update.startInstaller(parentPID: ProcessInfo.processInfo.processIdentifier)
                 handedOff = true
                 operation = nil
-                NSApp.terminate(nil)
+                // Start AppKit's modal termination loop outside the main queue,
+                // leaving it available to finish asynchronous shutdown tasks.
+                RunLoop.main.perform { MainActor.assumeIsolated { NSApp.terminate(nil) } }
             } catch {
                 guard !Task.isCancelled else { return }
                 logger.error("Update installation failed: \(error.localizedDescription, privacy: .public)")
-                showAlert("无法安装更新", error.localizedDescription)
+                await showAlert("无法安装更新", error.localizedDescription)
             }
         }
     }
 
-    private func showAlert(_ title: String, _ message: String) {
+    private func showAlert(_ title: String, _ message: String) async {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: "好")
+        _ = await presentAlert(alert)
+    }
+
+    private func presentAlert(_ alert: NSAlert) async -> NSApplication.ModalResponse {
+        guard !stopping, !Task.isCancelled else { return .cancel }
+        return await withCheckedContinuation { continuation in
+            pendingAlert?.dismiss()
+            let presentation = UpdateAlert(alert: alert) { [weak self] response in
+                self?.pendingAlert = nil
+                continuation.resume(returning: response)
+            }
+            pendingAlert = presentation
+            presentation.show()
+        }
+    }
+}
+
+@MainActor
+private final class UpdateAlert: NSObject, NSWindowDelegate {
+    private let alert: NSAlert
+    private var completion: (@MainActor (NSApplication.ModalResponse) -> Void)?
+
+    init(alert: NSAlert, completion: @escaping @MainActor (NSApplication.ModalResponse) -> Void) {
+        self.alert = alert
+        self.completion = completion
+    }
+
+    func show() {
+        alert.layout()
+        alert.window.delegate = self
+        for button in alert.buttons {
+            button.target = self
+            button.action = #selector(selectButton(_:))
+        }
         NSApp.activate()
-        alert.runModal()
+        alert.window.center()
+        alert.window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func selectButton(_ button: NSButton) {
+        guard let index = alert.buttons.firstIndex(of: button) else { return }
+        finish(NSApplication.ModalResponse(rawValue: NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + index))
+    }
+
+    func dismiss() { finish(.cancel) }
+
+    func windowWillClose(_ notification: Notification) { finish(.cancel, closeWindow: false) }
+
+    private func finish(_ response: NSApplication.ModalResponse, closeWindow: Bool = true) {
+        guard let completion else { return }
+        self.completion = nil
+        alert.window.delegate = nil
+        if closeWindow { alert.window.close() }
+        completion(response)
     }
 }

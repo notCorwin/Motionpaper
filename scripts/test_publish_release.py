@@ -177,6 +177,10 @@ def api():
         if release is None:
             fail("missing release " + release_id)
         if method == "GET":
+            failures = state.setdefault("release_read_failures", {})
+            if failures.get(release_id, 0) > 0:
+                failures[release_id] -= 1
+                fail("injected release read failure")
             emit(release)
         elif method == "PATCH":
             if "draft" in forms:
@@ -242,11 +246,47 @@ def api():
             save()
         else:
             fail("unsupported release method " + method)
-    elif method == "DELETE" and route.startswith("releases/assets/"):
+    elif route.startswith("releases/assets/"):
         asset_id = route[len("releases/assets/"):]
+        found_release = None
+        found_asset = None
         for release in state["releases"]:
-            release["assets"] = [a for a in release["assets"] if str(a["id"]) != asset_id]
-        save()
+            for item in release["assets"]:
+                if str(item["id"]) == asset_id:
+                    found_release = release
+                    found_asset = item
+                    break
+            if found_asset is not None:
+                break
+        if found_asset is None:
+            fail("missing release asset " + asset_id)
+        if method == "PATCH":
+            new_name = forms["name"]
+            failures = state.setdefault("asset_rename_failures", {})
+            if failures.get(new_name, 0) > 0:
+                failures[new_name] -= 1
+                if state.get("read_failure_after_rename_failure"):
+                    state.setdefault("release_read_failures", {})[str(found_release["id"])] = 1
+                save()
+                fail("injected asset rename failure for " + new_name)
+            if any(item is not found_asset and item["name"] == new_name for item in found_release["assets"]):
+                fail("duplicate release asset name " + new_name)
+            found_asset["name"] = new_name
+            download_tag = "untagged-draft-fixture" if found_release["draft"] else found_release["tag_name"]
+            found_asset["browser_download_url"] = (
+                f"https://github.com/{state['repository']}/releases/download/{download_tag}/{new_name}"
+            )
+            response_failures = state.setdefault("asset_rename_response_failures", {})
+            if response_failures.get(new_name, 0) > 0:
+                response_failures[new_name] -= 1
+                fail("injected lost asset rename response for " + new_name)
+            save()
+            emit(found_asset)
+        elif method == "DELETE":
+            found_release["assets"] = [item for item in found_release["assets"] if str(item["id"]) != asset_id]
+            save()
+        else:
+            fail("unsupported release asset method " + method)
     elif method == "DELETE" and route.startswith("git/refs/tags/"):
         tag = route[len("git/refs/tags/"):]
         state["tags"].pop(tag, None)
@@ -280,7 +320,7 @@ elif args[0] == "release" and len(args) > 1 and args[1] == "upload":
         content = path.read_bytes()
         download_tag = "untagged-draft-fixture" if release["draft"] else tag
         release["assets"] = [a for a in release["assets"] if a["name"] != path.name]
-        release["assets"].append({
+        uploaded_asset = {
             "id": max([int(a["id"]) for r in state["releases"] for a in r["assets"]] + [0]) + 1,
             "name": path.name,
             "size": len(content),
@@ -288,8 +328,19 @@ elif args[0] == "release" and len(args) > 1 and args[1] == "upload":
             "state": "uploaded",
             "browser_download_url": f"https://github.com/{state['repository']}/releases/download/{download_tag}/{path.name}",
             "content": base64.b64encode(content).decode("ascii"),
-        })
-    save()
+        }
+        if path.name == state.get("upload_metadata_mismatch_name"):
+            uploaded_asset["size"] += 1
+        release["assets"].append(uploaded_asset)
+        save()
+        fail_prefix = state.get("upload_failure_name_prefix", "")
+        fail_name = state.get("upload_failure_name", "")
+        if not state.get("upload_failure_fired") and (
+            (fail_prefix and path.name.startswith(fail_prefix)) or path.name == fail_name
+        ):
+            state["upload_failure_fired"] = True
+            save()
+            fail("injected upload failure after " + path.name)
 elif args[0] == "release" and len(args) > 1 and args[1] == "download":
     tag = args[2]
     options = args[3:]
@@ -304,7 +355,16 @@ elif args[0] == "release" and len(args) > 1 and args[1] == "download":
     destination.mkdir(parents=True, exist_ok=True)
     if (destination / pattern).exists() and "--clobber" not in options:
         fail("download destination already exists")
-    (destination / pattern).write_bytes(base64.b64decode(asset["content"]))
+    content = base64.b64decode(asset["content"])
+    if pattern == state.get("download_tamper_name") and not state.get("download_tamper_fired"):
+        tampered = bytearray(content)
+        if tampered:
+            tampered[0] ^= 1
+        else:
+            tampered.extend(b"tampered")
+        content = bytes(tampered)
+        state["download_tamper_fired"] = True
+    (destination / pattern).write_bytes(content)
     save()
 else:
     fail("unsupported command " + " ".join(args))
@@ -392,6 +452,135 @@ class PublishReleaseTests(unittest.TestCase):
             text=True, capture_output=True, check=False,
         )
         return result, json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def autobuild_sync_state(self, autobuild_commit):
+        stable_tag = "v1.0.0"
+        stable_commit = "f" * 40
+        stable = released(stable_tag, stable_commit, 101, "2026-01-01T00:00:00Z", "stable", "1.0.0")
+        autobuild_tag = "Autobuild-" + autobuild_commit
+        autobuild = released(
+            autobuild_tag, autobuild_commit, 102, "2026-02-01T00:00:00Z", "autobuild"
+        )
+        old_commit = "e" * 40
+        old_manifest = json.dumps({
+            "commit": old_commit,
+            "publishedAt": "2026-01-15T00:00:00Z",
+            "downloadURL": f"{RELEASE_BASE}/Autobuild-{old_commit}/Motionpaper-{old_commit[:12]}.dmg",
+            "sha256": "0" * 64,
+            "size": 10,
+        }, sort_keys=True).encode()
+        old_asset = asset(stable_tag, "update.json", old_manifest)
+        old_asset["id"] = stable["id"] * 10 + 2
+        stable["assets"].append(old_asset)
+        state = {
+            "branches": {"master": autobuild_commit},
+            "tags": {
+                stable_tag: {"type": "commit", "sha": stable_commit},
+                autobuild_tag: {"type": "commit", "sha": autobuild_commit},
+            },
+            "releases": [stable, autobuild],
+            "latest": autobuild_tag,
+        }
+        return state, old_asset["content"], autobuild["assets"][1]["content"]
+
+    def test_stable_draft_retry_reuses_uploaded_dmg_after_rebuild_changes_bytes(self):
+        commit = "a" * 40
+        tag = "v1.2.3"
+        dmg_name = f"Motionpaper-1.2.3-{commit[:12]}.dmg"
+        original_dmg = b"first nondeterministic disk image"
+        state = {
+            "branches": {"master": "b" * 40},
+            "tags": {tag: {"type": "commit", "sha": commit}},
+            "releases": [],
+            "latest": "Autobuild-" + "c" * 40,
+            "upload_failure_name": dmg_name,
+        }
+
+        first, after_first = self.run_publish(state, commit, "stable", "1.2.3", original_dmg)
+
+        self.assertNotEqual(first.returncode, 0)
+        draft = next(r for r in after_first["releases"] if r["tag_name"] == tag)
+        self.assertTrue(draft["draft"])
+        uploaded = next(a for a in draft["assets"] if a["name"] == dmg_name)
+        self.assertEqual(base64.b64decode(uploaded["content"]), original_dmg)
+        self.assertTrue(after_first["upload_failure_fired"])
+        calls_before_retry = len(after_first["calls"])
+
+        retry, published = self.run_publish(
+            after_first, commit, "stable", "1.2.3", b"a different rebuilt disk image"
+        )
+
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        release = next(r for r in published["releases"] if r["tag_name"] == tag)
+        self.assertFalse(release["draft"])
+        reused = next(a for a in release["assets"] if a["name"] == dmg_name)
+        self.assertEqual(reused["content"], uploaded["content"])
+        self.assertEqual(reused["digest"], uploaded["digest"])
+        self.assertFalse(any(
+            call[:3] == ["release", "upload", tag] and dmg_name in call
+            for call in published["calls"][calls_before_retry:]
+        ))
+
+    def test_new_stable_upload_rejects_api_metadata_that_does_not_match_local_dmg(self):
+        commit = "1" * 40
+        tag = "v1.0.1"
+        dmg_name = f"Motionpaper-1.0.1-{commit[:12]}.dmg"
+        state = {
+            "branches": {"master": "2" * 40},
+            "tags": {tag: {"type": "commit", "sha": commit}},
+            "releases": [],
+            "latest": "Autobuild-" + "3" * 40,
+            "upload_metadata_mismatch_name": dmg_name,
+        }
+
+        result, after = self.run_publish(state, commit, "stable", "1.0.1")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("size or SHA-256 does not match", result.stderr)
+        draft = next(r for r in after["releases"] if r["tag_name"] == tag)
+        self.assertTrue(draft["draft"])
+        self.assertFalse(any(
+            "--method" in call and call[call.index("--method") + 1] == "PATCH"
+            and "draft=false" in call
+            for call in after["calls"]
+        ))
+
+    def test_existing_stable_draft_rejects_tampered_downloaded_dmg(self):
+        commit = "4" * 40
+        tag = "v1.1.0"
+        dmg_name = f"Motionpaper-1.1.0-{commit[:12]}.dmg"
+        draft_dmg = b"server accepted package bytes"
+        draft = {
+            "id": 71,
+            "tag_name": tag,
+            "target_commitish": commit,
+            "draft": True,
+            "prerelease": False,
+            "published_at": None,
+            "assets": [asset(tag, dmg_name, draft_dmg)],
+        }
+        draft["assets"][0]["id"] = 712
+        state = {
+            "branches": {"master": "5" * 40},
+            "tags": {tag: {"type": "commit", "sha": commit}},
+            "releases": [draft],
+            "latest": "Autobuild-" + "6" * 40,
+            "download_tamper_name": dmg_name,
+        }
+
+        result, after = self.run_publish(state, commit, "stable", "1.1.0", b"different local bytes")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("size or SHA-256 does not match", result.stderr)
+        current = next(r for r in after["releases"] if r["tag_name"] == tag)
+        self.assertTrue(current["draft"])
+        self.assertEqual(base64.b64decode(current["assets"][0]["content"]), draft_dmg)
+        self.assertTrue(after["download_tamper_fired"])
+        self.assertFalse(any(
+            "--method" in call and call[call.index("--method") + 1] == "PATCH"
+            and "draft=false" in call
+            for call in after["calls"]
+        ))
 
     def test_first_stable_release_becomes_latest_and_binds_tag_and_commit(self):
         commit = "a" * 40
@@ -635,6 +824,87 @@ class PublishReleaseTests(unittest.TestCase):
             for call in after["calls"]
         ))
 
+    def test_autobuild_sync_upload_failure_keeps_old_stable_manifest_and_retry_completes(self):
+        commit = "7" * 40
+        state, old_content, new_content = self.autobuild_sync_state(commit)
+        state["upload_failure_name_prefix"] = "update.json.staging-"
+
+        first, after_first = self.run_publish(state, commit, "autobuild", "1.0.0")
+
+        self.assertNotEqual(first.returncode, 0)
+        stable = next(r for r in after_first["releases"] if r["tag_name"] == "v1.0.0")
+        live_manifest = next(a for a in stable["assets"] if a["name"] == "update.json")
+        self.assertEqual(live_manifest["content"], old_content)
+        self.assertTrue(any(a["name"].startswith("update.json.staging-") for a in stable["assets"]))
+        self.assertTrue(after_first["upload_failure_fired"])
+
+        calls_before_retry = len(after_first["calls"])
+        retry, after_retry = self.run_publish(after_first, commit, "autobuild", "1.0.0")
+
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        stable_after = next(r for r in after_retry["releases"] if r["tag_name"] == "v1.0.0")
+        self.assertEqual(
+            next(a for a in stable_after["assets"] if a["name"] == "update.json")["content"],
+            new_content,
+        )
+        self.assertFalse(any(
+            a["name"].startswith(("update.json.staging-", "update.json.backup-"))
+            for a in stable_after["assets"]
+        ))
+        self.assertFalse(any(
+            call[:3] == ["release", "upload", "v1.0.0"]
+            for call in after_retry["calls"][calls_before_retry:]
+        ))
+
+    def test_autobuild_sync_rename_failures_restore_old_manifest_and_retry_completes(self):
+        commit = "8" * 40
+        failures = [
+            {"asset_rename_failures": {"update.json": 1}},
+            {"asset_rename_response_failures": {"update.json.backup-1012": 1}},
+            {"asset_rename_failures": {"update.json": 1}, "read_failure_after_rename_failure": True},
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure):
+                state, old_content, new_content = self.autobuild_sync_state(commit)
+                state.update(failure)
+
+                first, after_first = self.run_publish(state, commit, "autobuild", "1.0.0")
+
+                self.assertNotEqual(first.returncode, 0)
+                stable = next(r for r in after_first["releases"] if r["tag_name"] == "v1.0.0")
+                live_manifest = next(a for a in stable["assets"] if a["name"] == "update.json")
+                self.assertEqual(live_manifest["content"], old_content)
+                self.assertTrue(any(a["name"].startswith("update.json.staging-") for a in stable["assets"]))
+                self.assertFalse(any(a["name"].startswith("update.json.backup-") for a in stable["assets"]))
+
+                retry, after_retry = self.run_publish(after_first, commit, "autobuild", "1.0.0")
+
+                self.assertEqual(retry.returncode, 0, retry.stderr)
+                stable_after = next(r for r in after_retry["releases"] if r["tag_name"] == "v1.0.0")
+                self.assertEqual(
+                    next(a for a in stable_after["assets"] if a["name"] == "update.json")["content"],
+                    new_content,
+                )
+                self.assertFalse(any(
+                    a["name"].startswith(("update.json.staging-", "update.json.backup-"))
+                    for a in stable_after["assets"]
+                ))
+
+    def test_autobuild_sync_accepts_successful_promotion_after_a_lost_response(self):
+        commit = "8" * 40
+        state, _, new_content = self.autobuild_sync_state(commit)
+        state["asset_rename_response_failures"] = {"update.json": 1}
+
+        result, after = self.run_publish(state, commit, "autobuild", "1.0.0")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        stable = next(r for r in after["releases"] if r["tag_name"] == "v1.0.0")
+        self.assertEqual(next(a for a in stable["assets"] if a["name"] == "update.json")["content"], new_content)
+        self.assertFalse(any(
+            a["name"].startswith(("update.json.staging-", "update.json.backup-"))
+            for a in stable["assets"]
+        ))
+
     def test_stable_release_without_notes_file_uses_short_default_body(self):
         commit = "2" * 40
         state = {
@@ -683,6 +953,30 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertTrue(any(
             "--method" in call and call[call.index("--method") + 1] == "PATCH"
             and "releases/52" in " ".join(call) and "make_latest=true" in call
+            for call in after["calls"]
+        ))
+
+    def test_existing_prerelease_with_stable_tag_is_rejected(self):
+        commit = "9" * 40
+        tag = "v1.0.0"
+        preview = released(tag, commit, 61, "2026-03-01T00:00:00Z", "stable", "1.0.0")
+        preview["prerelease"] = True
+        state = {
+            "branches": {"master": "8" * 40},
+            "tags": {tag: {"type": "commit", "sha": commit}},
+            "releases": [preview],
+            "latest": "Autobuild-" + "7" * 40,
+        }
+
+        result, after = self.run_publish(state, commit, "stable", "1.0.0")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("marked as a prerelease", result.stderr)
+        self.assertEqual(after["releases"], state["releases"])
+        self.assertEqual(after["latest"], state["latest"])
+        self.assertFalse(any(
+            "--method" in call and call[call.index("--method") + 1] in ("PATCH", "DELETE")
+            or call[:2] == ["release", "upload"]
             for call in after["calls"]
         ))
 
