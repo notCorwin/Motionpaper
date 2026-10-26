@@ -24,8 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
         statusItem.onCheckForUpdates = { [weak self] in self?.updates.checkForUpdates() }
         statusItem.onInstallUpdate = { [weak self] in self?.updates.installAvailableUpdate() }
+        statusItem.onInstallStableRelease = { [weak self] in self?.updates.installStableRelease() }
         statusItem.onOpenRepository = { [weak self] in self?.openRepository() }
         updates.onStateChange = { [weak self] state in self?.statusItem.update(state) }
+        updates.onStableReleaseChange = { [weak self] manifest in self?.statusItem.updateStableRelease(manifest) }
         playback.onStateChange = { [weak self] state in
             guard let self else { return }
             self.statusItem.update(state)

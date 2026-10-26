@@ -16,24 +16,47 @@ final class UpdateController {
         didSet { onStateChange?(state) }
     }
     var onStateChange: (@MainActor (State) -> Void)?
+    var onStableReleaseChange: (@MainActor (UpdateManifest?) -> Void)?
     private let service: UpdateService?
+    private let stableService: UpdateService?
+    private let channel: UpdateChannel
     private var availableUpdate: UpdateManifest?
+    private var availableStableRelease: UpdateManifest?
     private var operation: Task<Void, Never>?
+    private var stableCheck: Task<Void, Never>?
     private var automaticCheck: Task<Void, Never>?
     private var stopping = false
     private var shutdown: Task<Void, Never>?
     private let logger = Logger(subsystem: "local.motionpaper.app", category: "updates")
 
+    init(service: UpdateService, stableService: UpdateService?, channel: UpdateChannel) {
+        self.service = service
+        self.stableService = stableService
+        self.channel = channel
+    }
+
     init() {
         let bundle = Bundle.main
+        channel = UpdateChannel(rawValue: bundle.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String ?? "") ?? .autobuild
         if let commit = bundle.object(forInfoDictionaryKey: "MotionpaperCommit") as? String,
            let address = bundle.object(forInfoDictionaryKey: "MotionpaperUpdateURL") as? String,
            let url = URL(string: address),
            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            let directory = caches.appendingPathComponent("local.motionpaper.app/Updates", isDirectory: true)
             service = UpdateService(releaseURL: url, currentCommit: commit,
-                                    directory: caches.appendingPathComponent("local.motionpaper.app/Updates", isDirectory: true))
+                                    currentVersion: channel == .stable ? bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String : nil,
+                                    channel: channel, directory: directory)
+            if channel == .autobuild,
+               let address = bundle.object(forInfoDictionaryKey: "MotionpaperStableUpdateURL") as? String,
+               let stableURL = URL(string: address) {
+                stableService = UpdateService(releaseURL: stableURL, currentCommit: commit, channel: .stable,
+                                              directory: directory)
+            } else {
+                stableService = nil
+            }
         } else {
             service = nil
+            stableService = nil
         }
     }
 
@@ -55,7 +78,11 @@ final class UpdateController {
     func checkForUpdates() { check(userInitiated: true) }
 
     func installAvailableUpdate() {
-        if let availableUpdate { install(availableUpdate) }
+        if let availableUpdate, let service { install(availableUpdate, using: service) }
+    }
+
+    func installStableRelease() {
+        if let availableStableRelease, let stableService { install(availableStableRelease, using: stableService) }
     }
 
     func stop() -> Task<Void, Never>? {
@@ -67,10 +94,15 @@ final class UpdateController {
         let pending = operation
         pending?.cancel()
         operation = nil
-        guard checks != nil || pending != nil else { return nil }
-        let shutdown = Task { [service] in
+        let stable = stableCheck
+        stable?.cancel()
+        stableCheck = nil
+        guard checks != nil || pending != nil || stable != nil else { return nil }
+        let shutdown = Task { [service, stableService] in
             await service?.cancel()
+            await stableService?.cancel()
             await pending?.value
+            await stable?.value
             await checks?.value
         }
         self.shutdown = shutdown
@@ -83,13 +115,14 @@ final class UpdateController {
             if userInitiated { showAlert("无法检查更新", "请使用构建脚本或 GitHub Release 提供的应用。") }
             return
         }
+        checkStableRelease()
         state = .checking
         operation = Task { [weak self] in
             guard let self else { return }
             var requestedInstall: UpdateManifest?
             defer {
                 operation = nil
-                if let requestedInstall, !Task.isCancelled, !stopping { install(requestedInstall) }
+                if let requestedInstall, !Task.isCancelled, !stopping { install(requestedInstall, using: service) }
             }
             do {
                 let manifest = try await service.check()
@@ -99,7 +132,7 @@ final class UpdateController {
                 if userInitiated {
                     if let manifest {
                         let alert = NSAlert()
-                        alert.messageText = "发现更新 \(manifest.shortCommit)"
+                        alert.messageText = "发现更新 \(manifest.version?.description ?? manifest.shortCommit)"
                         alert.informativeText = "下载完成后将自动安装并重新启动 Motionpaper。"
                         alert.addButton(withTitle: "更新并重新启动")
                         alert.addButton(withTitle: "稍后")
@@ -108,26 +141,47 @@ final class UpdateController {
                             requestedInstall = manifest
                         }
                     } else {
-                        showAlert("已是最新发布版本", "当前 Motionpaper 与 GitHub 最新发布的 Autobuild 一致。")
+                        let release = channel == .stable ? "正式版" : "Autobuild"
+                        showAlert("已是最新发布版本", "当前 Motionpaper 已是最新发布的\(release)。")
                     }
                 }
             } catch {
                 guard !Task.isCancelled else { return }
-                state = availableUpdate.map(State.available) ?? .idle
+                availableUpdate = nil
+                state = .idle
                 logger.error("Update check failed: \(error.localizedDescription, privacy: .public)")
                 if userInitiated { showAlert("无法检查更新", error.localizedDescription) }
             }
         }
     }
 
-    private func install(_ manifest: UpdateManifest) {
-        guard !stopping, operation == nil, let service else { return }
+    private func checkStableRelease() {
+        guard let stableService, stableCheck == nil else { return }
+        availableStableRelease = nil
+        onStableReleaseChange?(nil)
+        stableCheck = Task { [weak self] in
+            guard let self else { return }
+            defer { stableCheck = nil }
+            do {
+                let manifest = try await stableService.check()
+                guard !Task.isCancelled, !stopping else { return }
+                availableStableRelease = manifest
+                onStableReleaseChange?(manifest)
+            } catch {
+                guard !Task.isCancelled, !stopping else { return }
+                logger.error("Stable release check failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func install(_ manifest: UpdateManifest, using service: UpdateService) {
+        guard !stopping, operation == nil else { return }
         state = .downloading(manifest)
         operation = Task { [weak self] in
             guard let self else { return }
             defer {
                 operation = nil
-                state = .available(manifest)
+                state = availableUpdate.map(State.available) ?? .idle
             }
             do {
                 try UpdateInstaller.validateDestination(Bundle.main.bundleURL)

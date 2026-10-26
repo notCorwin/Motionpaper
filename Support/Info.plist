@@ -8,10 +8,11 @@
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleVersion</key><string>1.0.0</string>
     <key>MotionpaperReleaseChannel</key><string>autobuild</string>
     <key>MotionpaperCommit</key><string>pending-build</string>
     <key>MotionpaperUpdateURL</key><string>pending-build</string>
+    <key>MotionpaperStableUpdateURL</key><string>pending-build</string>
     <key>MotionpaperRepositoryURL</key><string>pending-build</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>LSUIElement</key><true/>

@@ -162,6 +162,38 @@ def launch_case(root, binary, fixture_directory, scenario, should_fail):
     return report
 
 
+def verify_channel_menus(root, binary, fixture_directory):
+    for channel in ("autobuild", "stable"):
+        application, executable = make_application(root, binary, f"menu-{channel}")
+        information = application / "Contents/Info.plist"
+        with information.open("rb") as stream:
+            metadata = plistlib.load(stream)
+        stable_url = "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100"
+        metadata.update(
+            CFBundleShortVersionString="1.0.0",
+            MotionpaperReleaseChannel=channel,
+            MotionpaperRepositoryURL="https://github.com/notCorwin/Motionpaper",
+            MotionpaperStableUpdateURL=stable_url,
+            MotionpaperUpdateURL=stable_url if channel == "stable" else
+                "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest",
+        )
+        with information.open("wb") as stream:
+            plistlib.dump(metadata, stream)
+        output = root / f"menu-{channel}"
+        environment = dict(os.environ, DYLD_FRAMEWORK_PATH=str(fixture_directory),
+                           MOTIONPAPER_VERIFICATION_DIRECTORY=str(output))
+        environment.pop("MOTIONPAPER_ASSERTION_ACQUIRE_FAIL", None)
+        environment.pop("MOTIONPAPER_ASSERTION_ACQUIRE_DELAY_SECONDS", None)
+        run_result = subprocess.run([str(executable), "--verify-ui"], env=environment,
+                                    capture_output=True, text=True, timeout=20)
+        if run_result.returncode != 0:
+            raise RuntimeError(f"{channel} menu verification failed: {run_result.stderr}")
+        report = json.loads((output / "verification.json").read_text())
+        if (report.get("phase") != "terminated" or report.get("hasCheckedMenuItem")
+                or not report.get("applicationMenuVerified") or not report.get("updateMenuVerified")):
+            raise RuntimeError(f"Unexpected {channel} menu report: {report}")
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit(f"Usage: {Path(sys.argv[0]).name} <debug-Motionpaper-binary>")
@@ -171,8 +203,10 @@ def main():
         fixture_directory = compile_fixture(root / "fixture")
         success = launch_case(root, binary, fixture_directory, "success", should_fail=False)
         failure = launch_case(root, binary, fixture_directory, "failure", should_fail=True)
+        verify_channel_menus(root, binary, fixture_directory)
     print("Delayed successful playback wrote a matching update receipt only after acquisition.")
     print("Delayed failed playback exited cleanly without confirming the update launch.")
+    print("Autobuild and stable menus have working update actions and no login checkmarks.")
     print(f"Reports: success={success['phase']}/{success['state']}, failure={failure['phase']}/{failure['state']}")
 
 

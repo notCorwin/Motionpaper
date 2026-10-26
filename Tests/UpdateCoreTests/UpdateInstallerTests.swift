@@ -53,6 +53,26 @@ private let mismatchedCommit = String(repeating: "d", count: 40)
     #expect(!FileManager.default.fileExists(atPath: update.directory.path))
 }
 
+@Test func stableUpdateRequiresTheExpectedVersionAndChannelEvenAtTheSameCommit() throws {
+    let fixture = try InstallerFixture()
+    defer { fixture.cleanUp() }
+    let version = try #require(ReleaseVersion("1.0.0"))
+    let candidate = fixture.root.appendingPathComponent("Stable.app", isDirectory: true)
+    for (channel, candidateVersion, accepted) in [("autobuild", "1.0.0", false),
+                                                 ("stable", "1.0.1", false),
+                                                 ("stable", "1.0.0", true)] {
+        if FileManager.default.fileExists(atPath: candidate.path) { try FileManager.default.removeItem(at: candidate) }
+        try makeApplication(at: candidate, commit: originalCommit, channel: channel, version: candidateVersion)
+        if accepted {
+            try UpdateInstaller.validateApplication(candidate, commit: originalCommit, version: version)
+        } else {
+            #expect(throws: UpdateError.self) {
+                try UpdateInstaller.validateApplication(candidate, commit: originalCommit, version: version)
+            }
+        }
+    }
+}
+
 @Test func testUpdateInstallerRejectsCandidateWithWrongBundleIdentifier() async throws {
     let fixture = try InstallerFixture()
     defer { fixture.cleanUp() }
@@ -225,7 +245,8 @@ private struct InstallerFixture {
 }
 
 private func makeApplication(at application: URL, commit: String,
-                             bundleIdentifier: String = "local.motionpaper.app") throws {
+                             bundleIdentifier: String = "local.motionpaper.app",
+                             channel: String = "autobuild", version: String = "1.0.0") throws {
     let manager = FileManager.default
     let contents = application.appendingPathComponent("Contents", isDirectory: true)
     let executableDirectory = contents.appendingPathComponent("MacOS", isDirectory: true)
@@ -238,6 +259,8 @@ private func makeApplication(at application: URL, commit: String,
         "CFBundleName": "Motionpaper",
         "CFBundlePackageType": "APPL",
         "CFBundleVersion": "1",
+        "CFBundleShortVersionString": version,
+        "MotionpaperReleaseChannel": channel,
         "MotionpaperCommit": commit,
     ]
     let data = try PropertyListSerialization.data(fromPropertyList: information, format: .xml, options: 0)

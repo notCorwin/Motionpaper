@@ -3,6 +3,7 @@ name: Build and release
 on:
   push:
     branches: [master, main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -10,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'release' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (startsWith(github.ref, 'refs/tags/v') && 'stable' || 'autobuild') }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -22,6 +23,9 @@ jobs:
       short_commit: ${{ steps.target.outputs.short_commit }}
       default_branch: ${{ steps.target.outputs.default_branch }}
       should_release: ${{ steps.target.outputs.should_release }}
+      channel: ${{ steps.target.outputs.channel }}
+      version: ${{ steps.target.outputs.version }}
+      dmg_name: ${{ steps.target.outputs.dmg_name }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -48,15 +52,34 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           commit=$(git rev-parse HEAD)
-          short_commit=$(printf '%s' "$commit" | cut -c 1-12)
           should_release=false
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || { [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ]; }; then
+          channel=autobuild
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Support/Info.plist)
+          if [ "$GITHUB_EVENT_NAME" = push ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            channel=stable
+            version=${GITHUB_REF_NAME#v}
+            if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "error: stable release tag must be vX.Y.Z without leading zeroes: $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
             should_release=true
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || { [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ]; }; then
+            should_release=true
+          fi
+          short_commit=$(printf '%s' "$commit" | cut -c 1-12)
+          if [ "$channel" = stable ]; then
+            dmg_name="Motionpaper-$version-$short_commit.dmg"
+          else
+            dmg_name="Motionpaper-$short_commit.dmg"
           fi
           printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
           printf 'short_commit=%s\n' "$short_commit" >> "$GITHUB_OUTPUT"
           printf 'default_branch=%s\n' "$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
           printf 'should_release=%s\n' "$should_release" >> "$GITHUB_OUTPUT"
+          printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'dmg_name=%s\n' "$dmg_name" >> "$GITHUB_OUTPUT"
+          printf 'Release channel: %s\nRelease version: %s\nDMG name: %s\n' "$channel" "$version" "$dmg_name"
 
       - name: Test playback and update behavior
         run: swift test --parallel
@@ -73,6 +96,8 @@ jobs:
       - name: Build the menu bar app
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
+          MOTIONPAPER_RELEASE_CHANNEL: ${{ steps.target.outputs.channel }}
+          MOTIONPAPER_VERSION: ${{ steps.target.outputs.version }}
         run: sh scripts/build-app.sh release
 
       - name: Verify wallpaper linking and native assertion ownership
@@ -96,7 +121,7 @@ jobs:
         if: steps.target.outputs.should_release == 'true'
         with:
           name: motionpaper-release-${{ steps.target.outputs.commit }}
-          path: dist/Motionpaper-${{ steps.target.outputs.short_commit }}.dmg
+          path: dist/${{ steps.target.outputs.dmg_name }}
           if-no-files-found: error
           retention-days: 1
 
@@ -225,4 +250,6 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
           DEFAULT_BRANCH: ${{ needs.build.outputs.default_branch }}
+          MOTIONPAPER_RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
+          MOTIONPAPER_VERSION: ${{ needs.build.outputs.version }}
         run: bash scripts/publish-release.sh

@@ -87,8 +87,8 @@ extension AppDelegate {
             let titles = windows.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == ProcessInfo.processInfo.processIdentifier }
                 .compactMap { $0[kCGWindowName as String] as? String }
             observations["windowTitles"] = titles
-            let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
             statusItem.menuWillOpen(statusItem.menu)
+            let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
             let versionTitle = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable"
                 ? "Motionpaper \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")"
                 : "Motionpaper Autobuild"
@@ -98,7 +98,8 @@ extension AppDelegate {
                   visibleItems.enumerated().filter({ $0.element.isSeparatorItem }).map(\.offset) == [1, 4, 6],
                   visibleItems.first?.isEnabled == false,
                   visibleItems.first?.action == nil,
-                  visibleItems.filter({ $0.title != loginTitle }).allSatisfy({ $0.state == .off }),
+                  visibleItems.allSatisfy({ $0.state == .off }),
+                  !visibleItems.contains(where: { $0.title.hasPrefix("更新到正式版 ") }),
                   statusItem.symbolView.playbackEnabled,
                   titles.contains(StatusItemController.identifier),
                   let quit = visibleItems.last else {
@@ -154,20 +155,21 @@ extension AppDelegate {
         }
         let login = statusItem.menu.items.first { $0.title.hasPrefix("随开机自动启动：") }
         try require(login?.action != nil && login?.target === statusItem)
-        for (status, state, title) in [(SMAppService.Status.notRegistered, NSControl.StateValue.off, "随开机自动启动：否"),
-                                      (.notFound, .off, "随开机自动启动：否"),
-                                      (.enabled, .on, "随开机自动启动：是"),
-                                      (.requiresApproval, .mixed, "随开机自动启动：否")] {
+        let approvalTip = "请在系统设置的「通用 → 登录项与扩展」中允许 Motionpaper；再次点击可取消。"
+        let statuses: [(SMAppService.Status, String, String?)] = [
+            (.notRegistered, "随开机自动启动：否", nil),
+            (.notFound, "随开机自动启动：否", nil),
+            (.enabled, "随开机自动启动：是", nil),
+            (.requiresApproval, "随开机自动启动：否", approvalTip),
+        ]
+        for (status, title, toolTip) in statuses {
             statusItem.updateLaunchAtLogin(status)
-            try require(login?.title == title && login?.state == state && login?.isEnabled == true)
+            try require(login?.title == title && login?.state == .off && login?.isEnabled == true
+                        && login?.toolTip == toolTip)
         }
         statusItem.menuWillOpen(statusItem.menu)
-        let expected: NSControl.StateValue = switch SMAppService.mainApp.status {
-        case .enabled: .on
-        case .requiresApproval: .mixed
-        default: .off
-        }
-        try require(login?.state == expected)
+        let actualLoginTitle = SMAppService.mainApp.status == .enabled ? "随开机自动启动：是" : "随开机自动启动：否"
+        try require(login?.title == actualLoginTitle && login?.state == .off)
         var opens = 0
         statusItem.onOpenRepository = { opens += 1 }
         statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: "打开 GitHub 仓库"))
@@ -178,22 +180,33 @@ extension AppDelegate {
             return
         }
         try require(url.scheme == "https" && url.host == "github.com" && url.pathComponents.count == 3)
+        let owner = url.pathComponents[1]
+        let repository = url.pathComponents[2]
+        let latestURL = "https://api.github.com/repos/\(owner)/\(repository)/releases/latest"
+        let releasesURL = "https://api.github.com/repos/\(owner)/\(repository)/releases?per_page=100"
+        let isStableChannel = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable"
         try require(Bundle.main.object(forInfoDictionaryKey: "MotionpaperUpdateURL") as? String
-                    == "https://api.github.com/repos/\(url.pathComponents[1])/\(url.pathComponents[2])/releases/latest")
+                    == (isStableChannel ? releasesURL : latestURL))
+        try require(Bundle.main.object(forInfoDictionaryKey: "MotionpaperStableUpdateURL") as? String == releasesURL)
     }
 
     private func verifyUpdateMenu() throws {
         let originalCheck = statusItem.onCheckForUpdates
         let originalInstall = statusItem.onInstallUpdate
+        let originalStableInstall = statusItem.onInstallStableRelease
         defer {
             statusItem.onCheckForUpdates = originalCheck
             statusItem.onInstallUpdate = originalInstall
+            statusItem.onInstallStableRelease = originalStableInstall
+            statusItem.updateStableRelease(nil)
             statusItem.update(UpdateController.State.idle)
         }
         var checks = 0
         var installs = 0
+        var stableInstalls = 0
         statusItem.onCheckForUpdates = { checks += 1 }
         statusItem.onInstallUpdate = { installs += 1 }
+        statusItem.onInstallStableRelease = { stableInstalls += 1 }
         func require(_ valid: Bool) throws {
             guard valid else {
                 throw NSError(domain: "MotionpaperVerification", code: 3,
@@ -204,6 +217,39 @@ extension AppDelegate {
         try require(checks == 1)
         statusItem.update(UpdateController.State.checking)
         try require(statusItem.menu.item(withTitle: "正在检查更新…")?.isEnabled == false)
+
+        let stableManifest = UpdateManifest(
+            commit: String(repeating: "c", count: 40), publishedAt: Date(),
+            downloadURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/v1.0.0/Motionpaper-1.0.0-cccccccccccc.dmg")!,
+            sha256: String(repeating: "d", count: 64), size: 1, version: ReleaseVersion("1.0.0")!
+        )
+        let stableTitle = "更新到正式版 1.0.0"
+        let isStableChannel = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable"
+        statusItem.updateStableRelease(nil)
+        try require(!statusItem.menu.items.contains(where: { !$0.isHidden && $0.title.hasPrefix("更新到正式版 ") }))
+        statusItem.update(UpdateController.State.idle)
+        statusItem.updateStableRelease(stableManifest)
+        if isStableChannel {
+            try require(!statusItem.menu.items.contains(where: { !$0.isHidden && $0.title.hasPrefix("更新到正式版 ") }))
+        } else {
+            let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
+            guard let checkIndex = visibleItems.firstIndex(where: { $0.title == "检查更新" }),
+                  let stableIndex = visibleItems.firstIndex(where: { $0.title == stableTitle }),
+                  let repositoryIndex = visibleItems.firstIndex(where: { $0.title == "打开 GitHub 仓库" }),
+                  let stableItem = statusItem.menu.item(withTitle: stableTitle) else {
+                try require(false)
+                return
+            }
+            try require(!stableItem.isHidden && stableItem.isEnabled
+                        && checkIndex < stableIndex && stableIndex < repositoryIndex)
+            statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: stableTitle))
+            try require(stableInstalls == 1)
+            statusItem.update(UpdateController.State.checking)
+            try require(stableItem.isEnabled == false)
+            statusItem.update(UpdateController.State.idle)
+            try require(stableItem.isEnabled == true)
+        }
+
         let commit = String(repeating: "a", count: 40)
         let data = try JSONSerialization.data(withJSONObject: [
             "tag_name": "Autobuild-\(commit)",
@@ -226,12 +272,29 @@ extension AppDelegate {
         try require(statusItem.menu.item(withTitle: "检查更新")?.isEnabled == true)
         statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: installTitle))
         try require(installs == 1)
+
+        statusItem.update(UpdateController.State.available(stableManifest))
+        let versionedInstallTitle = "更新并重新启动（1.0.0）…"
+        try require(statusItem.menu.item(withTitle: versionedInstallTitle)?.isHidden == false)
+        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: versionedInstallTitle))
+        try require(installs == 2)
+
         statusItem.update(UpdateController.State.downloading(manifest))
         try require(statusItem.menu.item(withTitle: "正在下载更新…")?.isEnabled == false)
         try require(statusItem.menu.item(withTitle: "检查更新")?.isEnabled == false)
+        if !isStableChannel {
+            try require(statusItem.menu.item(withTitle: stableTitle)?.isEnabled == false)
+        }
+        statusItem.update(UpdateController.State.available(manifest))
+        if !isStableChannel {
+            try require(statusItem.menu.item(withTitle: stableTitle)?.isEnabled == true)
+        }
         statusItem.update(UpdateController.State.installing)
         try require(statusItem.menu.item(withTitle: "正在安装更新…")?.isEnabled == false)
         try require(statusItem.menu.item(withTitle: "检查更新")?.isEnabled == false)
+        if !isStableChannel {
+            try require(statusItem.menu.item(withTitle: stableTitle)?.isEnabled == false)
+        }
     }
 
     func verifyTermination() {

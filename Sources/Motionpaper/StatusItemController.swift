@@ -2,6 +2,7 @@ import AppKit
 import PlaybackCore
 import QuartzCore
 import ServiceManagement
+import UpdateCore
 
 @MainActor
 final class StatusItemController: NSObject, NSMenuDelegate {
@@ -15,8 +16,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var isUpdatingLaunchAtLogin = false
     private let updateItem = NSMenuItem(title: "检查更新", action: nil, keyEquivalent: "")
     private let installItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let stableReleaseItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let isAutobuild = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String != "stable"
+    private var isUpdating = false
     var onCheckForUpdates: (@MainActor () -> Void)?
     var onInstallUpdate: (@MainActor () -> Void)?
+    var onInstallStableRelease: (@MainActor () -> Void)?
     var onOpenRepository: (@MainActor () -> Void)?
 
     override init() {
@@ -66,6 +71,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         installItem.action = #selector(installUpdate)
         installItem.isHidden = true
         menu.addItem(installItem)
+        stableReleaseItem.target = self
+        stableReleaseItem.action = #selector(installStableRelease)
+        stableReleaseItem.isHidden = true
+        menu.addItem(stableReleaseItem)
         let repository = NSMenuItem(title: "打开 GitHub 仓库", action: #selector(openRepository), keyEquivalent: "")
         repository.target = self
         menu.addItem(repository)
@@ -84,6 +93,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func checkForUpdates() { onCheckForUpdates?() }
     @objc private func installUpdate() { onInstallUpdate?() }
+    @objc private func installStableRelease() { onInstallStableRelease?() }
     @objc private func openRepository() { onOpenRepository?() }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -92,11 +102,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func updateLaunchAtLogin(_ status: SMAppService.Status) {
         launchAtLoginItem.title = status == .enabled ? "随开机自动启动：是" : "随开机自动启动：否"
-        launchAtLoginItem.state = switch status {
-        case .enabled: .on
-        case .requiresApproval: .mixed
-        default: .off
-        }
+        launchAtLoginItem.state = .off
         launchAtLoginItem.toolTip = status == .requiresApproval
             ? "请在系统设置的「通用 → 登录项与扩展」中允许 Motionpaper；再次点击可取消。" : nil
         // A fresh mainApp service can report .notFound until its first registration.
@@ -129,6 +135,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     func update(_ state: UpdateController.State) {
+        switch state {
+        case .checking, .downloading, .installing: isUpdating = true
+        default: isUpdating = false
+        }
+        stableReleaseItem.isEnabled = !isUpdating
         updateItem.isEnabled = true
         updateItem.title = "检查更新"
         installItem.isHidden = true
@@ -141,7 +152,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             updateItem.isEnabled = false
         case .available(let manifest):
             installItem.isHidden = false
-            installItem.title = "更新并重新启动（\(manifest.shortCommit)）…"
+            installItem.title = "更新并重新启动（\(manifest.version?.description ?? manifest.shortCommit)）…"
         case .downloading:
             updateItem.isEnabled = false
             installItem.isHidden = false
@@ -153,6 +164,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             installItem.title = "正在安装更新…"
             installItem.isEnabled = false
         }
+    }
+
+    func updateStableRelease(_ manifest: UpdateManifest?) {
+        guard isAutobuild, let version = manifest?.version else {
+            stableReleaseItem.isHidden = true
+            return
+        }
+        stableReleaseItem.title = "更新到正式版 \(version)"
+        stableReleaseItem.isHidden = false
+        stableReleaseItem.isEnabled = !isUpdating
     }
 
     func update(_ state: PlaybackController.State) {

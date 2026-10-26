@@ -46,7 +46,7 @@ public enum UpdateInstaller {
         guard source.resolvingSymlinksInPath() == source else { throw UpdateError.invalidApplication }
         try run("/usr/bin/ditto", [source.path, update.replacement.path])
         try Task.checkCancellation()
-        try validateApplication(update.replacement, commit: manifest.commit)
+        try validateApplication(update.replacement, commit: manifest.commit, version: manifest.version)
         try run("/usr/bin/hdiutil", ["detach", "-quiet", mount.path])
         detached = true
         try manager.removeItem(at: mount)
@@ -134,8 +134,16 @@ public enum UpdateInstaller {
         return commit
     }
 
-    static func validateApplication(_ application: URL, commit: String) throws {
+    static func validateApplication(_ application: URL, commit: String, version: ReleaseVersion? = nil) throws {
         guard try bundleCommit(application) == commit else { throw UpdateError.invalidApplication }
+        if let version {
+            let data = try Data(contentsOf: application.appendingPathComponent("Contents/Info.plist"))
+            guard let info = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  info["MotionpaperReleaseChannel"] as? String == "stable",
+                  info["CFBundleShortVersionString"] as? String == version.description else {
+                throw UpdateError.invalidApplication
+            }
+        }
         try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--all-architectures",
                                     "-R", "=identifier \"local.motionpaper.app\"", application.path])
     }

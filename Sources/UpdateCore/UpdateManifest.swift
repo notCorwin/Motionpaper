@@ -6,19 +6,26 @@ public struct UpdateManifest: Equatable, Sendable {
     public let downloadURL: URL
     public let sha256: String
     public let size: Int64
+    public let version: ReleaseVersion?
 
     public var shortCommit: String { String(commit.prefix(12)) }
+
+    public init(commit: String, publishedAt: Date, downloadURL: URL, sha256: String, size: Int64,
+                version: ReleaseVersion? = nil) {
+        self.commit = commit
+        self.publishedAt = publishedAt
+        self.downloadURL = downloadURL
+        self.sha256 = sha256
+        self.size = size
+        self.version = version
+    }
 
     public static func decode(_ data: Data, releaseURL: URL) throws -> Self {
         guard data.count <= 65_536 else { throw UpdateError.invalidManifest }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let release = try decoder.decode(Release.self, from: data)
-        let components = releaseURL.pathComponents
-        guard components.count == 6, components[1] == "repos",
-              isRepositoryComponent(components[2]), isRepositoryComponent(components[3]),
-              Array(components.suffix(2)) == ["releases", "latest"],
-              releaseURL.absoluteString == "https://api.github.com/repos/\(components[2])/\(components[3])/releases/latest",
+        guard let repository = autobuildRepository(in: releaseURL),
               !release.draft, !release.prerelease,
               release.tagName.hasPrefix("Autobuild-") else { throw UpdateError.invalidManifest }
 
@@ -30,12 +37,65 @@ public struct UpdateManifest: Equatable, Sendable {
               asset.state == "uploaded", asset.size > 0,
               let digest = asset.digest, digest.hasPrefix("sha256:") else { throw UpdateError.invalidManifest }
         let checksum = String(digest.dropFirst("sha256:".count))
-        let expected = "https://github.com/\(components[2])/\(components[3])/releases/download/\(release.tagName)/\(name)"
+        let expected = "https://github.com/\(repository.owner)/\(repository.name)/releases/download/\(release.tagName)/\(name)"
         guard isHex(checksum, count: 64), asset.downloadURL.absoluteString == expected else {
             throw UpdateError.invalidManifest
         }
         return Self(commit: commit, publishedAt: release.publishedAt, downloadURL: asset.downloadURL,
                     sha256: checksum, size: asset.size)
+    }
+
+    /// Decodes and validates one formal release from the repository's releases list.
+    public static func decodeStableRelease(_ data: Data, releaseURL: URL) throws -> Self {
+        guard data.count <= 1_048_576, let repository = stableRepository(in: releaseURL) else {
+            throw UpdateError.invalidManifest
+        }
+        let release = try JSONDecoder().decode(StableRelease.self, from: data)
+        guard !release.draft, !release.prerelease,
+              release.tagName.hasPrefix("v"),
+              let version = ReleaseVersion(String(release.tagName.dropFirst())),
+              isHex(release.targetCommitish, count: 40),
+              let publishedAt = decodeISO8601(release.publishedAt) else {
+            throw UpdateError.invalidManifest
+        }
+
+        let commit = release.targetCommitish
+        let name = "Motionpaper-\(version)-\(commit.prefix(12)).dmg"
+        let assets = release.assets.filter { $0.name == name }
+        guard assets.count == 1, let asset = assets.first,
+              asset.state == "uploaded", asset.size > 0,
+              let digest = asset.digest, digest.hasPrefix("sha256:") else {
+            throw UpdateError.invalidManifest
+        }
+        let checksum = String(digest.dropFirst("sha256:".count))
+        let expected = "https://github.com/\(repository.owner)/\(repository.name)/releases/download/\(release.tagName)/\(name)"
+        guard isHex(checksum, count: 64), asset.downloadURL.absoluteString == expected else {
+            throw UpdateError.invalidManifest
+        }
+        return Self(commit: commit, publishedAt: publishedAt, downloadURL: asset.downloadURL,
+                    sha256: checksum, size: asset.size, version: version)
+    }
+
+    static func autobuildRepository(in releaseURL: URL) -> (owner: String, name: String)? {
+        let components = releaseURL.pathComponents
+        guard components.count == 6, components[1] == "repos",
+              isRepositoryComponent(components[2]), isRepositoryComponent(components[3]),
+              Array(components.suffix(2)) == ["releases", "latest"],
+              releaseURL.absoluteString == "https://api.github.com/repos/\(components[2])/\(components[3])/releases/latest" else {
+            return nil
+        }
+        return (components[2], components[3])
+    }
+
+    static func stableRepository(in releaseURL: URL) -> (owner: String, name: String)? {
+        let components = releaseURL.pathComponents
+        guard components.count == 5, components[1] == "repos",
+              isRepositoryComponent(components[2]), isRepositoryComponent(components[3]),
+              components[4] == "releases",
+              releaseURL.absoluteString == "https://api.github.com/repos/\(components[2])/\(components[3])/releases?per_page=100" else {
+            return nil
+        }
+        return (components[2], components[3])
     }
 
     private struct Release: Decodable {
@@ -65,6 +125,22 @@ public struct UpdateManifest: Equatable, Sendable {
         }
     }
 
+    private struct StableRelease: Decodable {
+        let tagName: String
+        let targetCommitish: String
+        let publishedAt: String
+        let draft: Bool
+        let prerelease: Bool
+        let assets: [Asset]
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case targetCommitish = "target_commitish"
+            case publishedAt = "published_at"
+            case draft, prerelease, assets
+        }
+    }
+
     private static func isRepositoryComponent(_ value: String) -> Bool {
         !value.isEmpty && value != "." && value != ".." && value.utf8.allSatisfy {
             (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0)
@@ -74,6 +150,14 @@ public struct UpdateManifest: Equatable, Sendable {
 
     private static func isHex(_ value: String, count: Int) -> Bool {
         value.utf8.count == count && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
+    private static func decodeISO8601(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
     }
 }
 

@@ -3,6 +3,7 @@ import Testing
 @testable import UpdateCore
 
 private let releaseURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest")!
+private let stableListURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100")!
 private let commit = String(repeating: "a", count: 40)
 private let nextCommit = String(repeating: "b", count: 40)
 private let digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -31,6 +32,37 @@ private func releaseData(commit: String = commit, checksum: String = digest, siz
     ]
     if let body { release["body"] = body }
     return try JSONSerialization.data(withJSONObject: release)
+}
+
+private func stableRelease(version: String, commit: String = commit, checksum: String = digest, size: Int = 3,
+                           publishedAt: String = "2026-10-25T00:00:00Z", tag: String? = nil,
+                           draft: Bool = false, prerelease: Bool = false, targetCommit: String? = nil,
+                           assetName: String? = nil, assetState: String = "uploaded",
+                           download: String? = nil, assetDigest: String? = nil,
+                           additionalAssets: [[String: Any]] = []) -> [String: Any] {
+    let tagName = tag ?? "v\(version)"
+    let target = targetCommit ?? commit
+    let name = assetName ?? "Motionpaper-\(version)-\(String(target.prefix(12))).dmg"
+    let expectedDownload = "https://github.com/notCorwin/Motionpaper/releases/download/\(tagName)/\(name)"
+    let asset: [String: Any] = [
+        "name": name,
+        "state": assetState,
+        "browser_download_url": download ?? expectedDownload,
+        "size": size,
+        "digest": assetDigest ?? "sha256:\(checksum)",
+    ]
+    return [
+        "tag_name": tagName,
+        "target_commitish": target,
+        "draft": draft,
+        "prerelease": prerelease,
+        "published_at": publishedAt,
+        "assets": [asset] + additionalAssets,
+    ]
+}
+
+private func stableJSON(_ releases: [[String: Any]]) throws -> Data {
+    try JSONSerialization.data(withJSONObject: releases)
 }
 
 @Test func manifestBindsGitHubReleaseAndArtifactToRepositoryAndCommit() throws {
@@ -99,6 +131,51 @@ private func releaseData(commit: String = commit, checksum: String = digest, siz
         #expect(throws: (any Error).self) {
             try UpdateManifest.decode(data, releaseURL: releaseURL)
         }
+    }
+}
+
+@Test func stableManifestValidatesVersionCommitDigestAndExactRepositoryArtifact() throws {
+    let data = try JSONSerialization.data(withJSONObject: stableRelease(version: "1.2.3"))
+    let manifest = try UpdateManifest.decodeStableRelease(data, releaseURL: stableListURL)
+    #expect(manifest.version?.description == "1.2.3")
+    #expect(manifest.commit == commit)
+    #expect(manifest.publishedAt == ISO8601DateFormatter().date(from: "2026-10-25T00:00:00Z"))
+    #expect(manifest.downloadURL.absoluteString == "https://github.com/notCorwin/Motionpaper/releases/download/v1.2.3/Motionpaper-1.2.3-aaaaaaaaaaaa.dmg")
+
+    for release in [
+        stableRelease(version: "1.2.3", tag: "v1.2.3-rc.1"),
+        stableRelease(version: "1.2.3", targetCommit: String(commit.prefix(12))),
+        stableRelease(version: "1.2.3", targetCommit: String(repeating: "A", count: 40)),
+        stableRelease(version: "1.2.3", assetDigest: "sha256:BAD"),
+        stableRelease(version: "1.2.3", download: "https://github.com/another/Motionpaper/releases/download/v1.2.3/Motionpaper-1.2.3-aaaaaaaaaaaa.dmg"),
+        stableRelease(version: "1.2.3", download: "https://github.com/notCorwin/Motionpaper/releases/download/v1.2.4/Motionpaper-1.2.3-aaaaaaaaaaaa.dmg"),
+        stableRelease(version: "1.2.3", assetName: "Motionpaper-1.2.3.dmg"),
+        stableRelease(version: "1.2.3", size: 0),
+        stableRelease(version: "1.2.3", assetState: "uploading"),
+        stableRelease(version: "1.2.3", publishedAt: "not-a-date"),
+        stableRelease(version: "1.2.3", draft: true),
+        stableRelease(version: "1.2.3", prerelease: true),
+    ] {
+        #expect(throws: (any Error).self) {
+            try UpdateManifest.decodeStableRelease(JSONSerialization.data(withJSONObject: release), releaseURL: stableListURL)
+        }
+    }
+
+    #expect(throws: (any Error).self) {
+        try UpdateManifest.decodeStableRelease(data,
+            releaseURL: URL(string: "https://api.github.com/repos/another/Motionpaper/releases?per_page=100")!)
+    }
+    #expect(throws: (any Error).self) {
+        try UpdateManifest.decodeStableRelease(data, releaseURL: releaseURL)
+    }
+}
+
+@Test func releaseVersionUsesStrictNumericSemanticOrdering() {
+    #expect(ReleaseVersion("1.10.0")! > ReleaseVersion("1.9.99")!)
+    #expect(ReleaseVersion("2.0.0")! > ReleaseVersion("1.99.99")!)
+    #expect(ReleaseVersion("1.2.3") == ReleaseVersion("1.2.3"))
+    for invalid in ["1", "1.2", "1.2.3.4", "01.2.3", "1.02.3", "1.2.03", "1.2.3-rc.1", "1.2.x", " 1.2.3"] {
+        #expect(ReleaseVersion(invalid) == nil)
     }
 }
 
@@ -197,6 +274,85 @@ private func releaseData(commit: String = commit, checksum: String = digest, siz
     let results = try await [first, second, third]
     #expect(results.compactMap { $0?.commit } == Array(repeating: commit, count: 3))
     #expect(CoalescingProtocol.requestCount() == 1)
+}
+
+@Test func stableDiscoveryPaginatesSelectsHighestVersionAndAppliesChannelRules() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [StableReleaseProtocol.self]
+    let session = URLSession(configuration: configuration)
+    defer { session.invalidateAndCancel() }
+
+    var firstPage = [
+        stableRelease(version: "2.10.0", publishedAt: "2026-10-26T00:00:00Z"),
+        stableRelease(version: "100.0.0", prerelease: true),
+        stableRelease(version: "101.0.0", draft: true),
+        ["tag_name": "Autobuild-\(commit)", "draft": false, "prerelease": false],
+    ]
+    firstPage += (0..<96).map { index in
+        ["tag_name": "Autobuild-\(String(format: "%040x", index + 1))", "draft": false, "prerelease": false]
+    }
+    let pageTwoRelease = stableRelease(version: "10.2.3", publishedAt: "2025-01-01T00:00:00Z")
+    let nextPage = "https://api.github.com/repos/notCorwin/Motionpaper/releases?page=2&per_page=100"
+    StableReleaseProtocol.configure([
+        .init(status: 200, body: try stableJSON(firstPage), headers: ["Link": "<\(nextPage)>; rel=\"next\""]),
+        .init(status: 200, body: try stableJSON([pageTwoRelease]), headers: [:]),
+    ])
+
+    let migration = UpdateService(releaseURL: stableListURL, currentCommit: commit, channel: .stable,
+                                  directory: FileManager.default.temporaryDirectory, session: session)
+    let discovered = try await migration.check()
+    #expect(discovered?.version == ReleaseVersion("10.2.3"))
+    #expect(discovered?.commit == commit) // A same-commit stable release is offered to Autobuild users.
+
+    let requests = StableReleaseProtocol.recordedRequests()
+    #expect(requests.map(\.url?.absoluteString) == [stableListURL.absoluteString, nextPage])
+    #expect(requests.allSatisfy { $0.cachePolicy == .reloadIgnoringLocalAndRemoteCacheData })
+    #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "Cache-Control") == "no-cache" })
+
+    StableReleaseProtocol.configure([.init(status: 200, body: try stableJSON([pageTwoRelease]), headers: [:])])
+    let upgradeSameCommit = UpdateService(releaseURL: stableListURL, currentCommit: commit, currentVersion: "10.2.2",
+                                          channel: .stable, directory: FileManager.default.temporaryDirectory,
+                                          session: session)
+    #expect(try await upgradeSameCommit.check()?.version == ReleaseVersion("10.2.3"))
+
+    StableReleaseProtocol.configure([.init(status: 200, body: try stableJSON([pageTwoRelease]), headers: [:])])
+    let current = UpdateService(releaseURL: stableListURL, currentCommit: commit, currentVersion: "10.2.3",
+                                channel: .stable, directory: FileManager.default.temporaryDirectory,
+                                session: session)
+    #expect(try await current.check() == nil)
+
+    StableReleaseProtocol.configure([.init(status: 200, body: try stableJSON([pageTwoRelease]), headers: [:])])
+    let newerInstalled = UpdateService(releaseURL: stableListURL, currentCommit: nextCommit, currentVersion: "10.3.0",
+                                       channel: .stable, directory: FileManager.default.temporaryDirectory,
+                                       session: session)
+    #expect(try await newerInstalled.check() == nil)
+
+    // GitHub may end on a full page without a next relation; the Link header defines the end.
+    StableReleaseProtocol.configure([.init(status: 200, body: try stableJSON(firstPage), headers: [:])])
+    let fullTerminalPage = UpdateService(releaseURL: stableListURL, currentCommit: "other", currentVersion: "1.0.0",
+                                         channel: .stable, directory: FileManager.default.temporaryDirectory,
+                                         session: session)
+    #expect(try await fullTerminalPage.check()?.version == ReleaseVersion("2.10.0"))
+
+    // A next relation pointing outside the exact repository endpoint is rejected and never fetched.
+    let foreignNext = "https://api.github.com/repos/another/Motionpaper/releases?page=2&per_page=100"
+    StableReleaseProtocol.configure([.init(status: 200, body: try stableJSON(firstPage),
+                                           headers: ["Link": "<\(foreignNext)>; rel=\"next\""])])
+    let rejectsForeignPage = UpdateService(releaseURL: stableListURL, currentCommit: "other", channel: .stable,
+                                           directory: FileManager.default.temporaryDirectory, session: session)
+    await #expect(throws: UpdateError.self) { try await rejectsForeignPage.check() }
+    #expect(StableReleaseProtocol.recordedRequests().count == 1)
+
+    StableReleaseProtocol.configure([
+        .init(status: 200, body: try stableJSON([stableRelease(version: "1.0.0")]), headers: [:]),
+        .init(status: 500, body: Data(), headers: [:]),
+    ])
+    let freshCheck = UpdateService(releaseURL: stableListURL, currentCommit: "other", channel: .stable,
+                                  directory: FileManager.default.temporaryDirectory, session: session)
+
+    #expect(try await freshCheck.check()?.version == ReleaseVersion("1.0.0"))
+    await #expect(throws: UpdateError.self) { try await freshCheck.check() }
+    #expect(StableReleaseProtocol.recordedRequests().count == 2)
 }
 
 private final class UpdateProtocol: URLProtocol, @unchecked Sendable {
@@ -325,6 +481,58 @@ private final class CoalescingProtocol: URLProtocol, @unchecked Sendable {
         }
     }
     override func stopLoading() {}
+}
+
+private final class StableReleaseProtocol: URLProtocol, @unchecked Sendable {
+    struct StubResponse {
+        let status: Int
+        let body: Data
+        let headers: [String: String]
+    }
+
+    private static let state = StableReleaseState()
+
+    static func configure(_ responses: [StubResponse]) { state.configure(responses) }
+    static func recordedRequests() -> [URLRequest] { state.recordedRequests() }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let stub = Self.state.nextResponse(for: request)
+        guard let url = request.url,
+              let response = HTTPURLResponse(url: url, statusCode: stub.status, httpVersion: "HTTP/1.1",
+                                             headerFields: stub.headers) else { return }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if !stub.body.isEmpty { client?.urlProtocol(self, didLoad: stub.body) }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+private final class StableReleaseState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var responses: [StableReleaseProtocol.StubResponse] = []
+    private var requests: [URLRequest] = []
+
+    func configure(_ responses: [StableReleaseProtocol.StubResponse]) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.responses = responses
+        requests = []
+    }
+
+    func recordedRequests() -> [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
+    }
+
+    func nextResponse(for request: URLRequest) -> StableReleaseProtocol.StubResponse {
+        lock.lock()
+        defer { lock.unlock() }
+        requests.append(request)
+        return responses[min(requests.count - 1, responses.count - 1)]
+    }
 }
 
 private final class CoalescingProtocolState: @unchecked Sendable {
