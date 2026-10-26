@@ -245,6 +245,16 @@ extension AppDelegate {
             try require(stableItem.isEnabled == false)
             statusItem.update(UpdateController.State.idle)
             try require(stableItem.isEnabled == true)
+            let newerVersion = "1.2.3"
+            let newerStable = UpdateManifest(
+                commit: stableManifest.commit, publishedAt: Date(),
+                downloadURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/v\(newerVersion)/Motionpaper-\(newerVersion)-cccccccccccc.dmg")!,
+                sha256: stableManifest.sha256, size: stableManifest.size, version: ReleaseVersion(newerVersion)!
+            )
+            statusItem.updateStableRelease(newerStable)
+            try require(statusItem.menu.item(withTitle: "更新到正式版 \(newerVersion)")?.isHidden == false)
+            try require(statusItem.menu.item(withTitle: stableTitle) == nil)
+            statusItem.updateStableRelease(stableManifest)
         }
 
         let commit = String(repeating: "a", count: 40)

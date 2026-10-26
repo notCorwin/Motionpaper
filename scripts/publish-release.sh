@@ -119,17 +119,24 @@ fetch_releases() {
 }
 
 reconcile_latest_stable() {
-    local releases_file=$1 stable_row stable_id stable_tag
-    stable_row=$(highest_stable_release "$releases_file")
-    [[ -n $stable_row ]] || return 0
-    IFS=$'\t' read -r stable_id stable_tag <<<"$stable_row"
-    if [[ $(current_latest_tag) != "$stable_tag" ]]; then
-        gh api --method PATCH "repos/$repository/releases/$stable_id" -f make_latest=true >"$work_dir/latest-release.json"
-        [[ $(current_latest_tag) == "$stable_tag" ]] || {
-            echo "error: GitHub latest release is not the highest stable release $stable_tag" >&2
-            return 1
-        }
-    fi
+    local releases_file=$1 stable_row stable_id stable_tag attempt verified_file verified_row
+    for attempt in 1 2 3; do
+        stable_row=$(highest_stable_release "$releases_file")
+        [[ -n $stable_row ]] || return 0
+        IFS=$'\t' read -r stable_id stable_tag <<<"$stable_row"
+        if [[ $(current_latest_tag) != "$stable_tag" ]]; then
+            gh api --method PATCH "repos/$repository/releases/$stable_id" -f make_latest=true >"$work_dir/latest-release.json"
+        fi
+        verified_file="$work_dir/latest-stable-verified-$attempt.json"
+        fetch_releases "$verified_file"
+        verified_row=$(highest_stable_release "$verified_file")
+        if [[ $verified_row == "$stable_row" && $(current_latest_tag) == "$stable_tag" ]]; then
+            return 0
+        fi
+        releases_file=$verified_file
+    done
+    echo "error: latest stable release kept changing during reconciliation" >&2
+    return 1
 }
 
 is_current_latest_autobuild() {

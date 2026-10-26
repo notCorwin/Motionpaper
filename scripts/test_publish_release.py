@@ -187,6 +187,18 @@ def api():
                     for item in release["assets"]:
                         item["browser_download_url"] = f"https://github.com/{state['repository']}/releases/download/{release['tag_name']}/{item['name']}"
             if forms.get("make_latest") == "true":
+                hook = state.get("latest_patch_hook")
+                if (
+                    hook and not hook.get("fired")
+                    and release["tag_name"] == hook["patch_tag"]
+                ):
+                    injected = hook["release"]
+                    state["releases"].append(injected)
+                    state["tags"][injected["tag_name"]] = {
+                        "type": "commit", "sha": injected["target_commitish"],
+                    }
+                    hook["fired"] = True
+                    state["latest_patch_hook_fired"] = injected["tag_name"]
                 state["latest"] = release["tag_name"]
             hook = state.get("stable_publish_hook")
             if "draft" in forms and hook and release["tag_name"] == hook["stable_publish_tag"]:
@@ -671,6 +683,64 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertTrue(any(
             "--method" in call and call[call.index("--method") + 1] == "PATCH"
             and "releases/52" in " ".join(call) and "make_latest=true" in call
+            for call in after["calls"]
+        ))
+
+    def test_published_stable_retry_repairs_latest_after_a_newer_stable_races_the_patch(self):
+        old_commit = "9" * 40
+        old_tag = "v1.0.0"
+        old_release = released(old_tag, old_commit, 51, "2026-03-01T00:00:00Z", "stable", "1.0.0")
+        newer_commit = "8" * 40
+        newer_tag = "v2.0.0"
+        newer_release = released(
+            newer_tag, newer_commit, 52, "2026-03-02T00:00:00Z", "stable", "2.0.0"
+        )
+        auto_commit = "7" * 40
+        auto_release = released(
+            "Autobuild-" + auto_commit, auto_commit, 53,
+            "2026-03-03T00:00:00Z", "autobuild",
+        )
+        state = {
+            "branches": {"master": "6" * 40},
+            "tags": {
+                old_tag: {"type": "commit", "sha": old_commit},
+                auto_release["tag_name"]: {"type": "commit", "sha": auto_commit},
+            },
+            "releases": [old_release, auto_release],
+            "latest": auto_release["tag_name"],
+            "latest_patch_hook": {"patch_tag": old_tag, "release": newer_release},
+        }
+        stable_dmg_before = {
+            old_tag: next(a for a in old_release["assets"] if a["name"].endswith(".dmg")),
+            newer_tag: next(a for a in newer_release["assets"] if a["name"].endswith(".dmg")),
+        }
+
+        result, after = self.run_publish(state, old_commit, "stable", "1.0.0", b"rebuilt DMG")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Reusing complete published stable release", result.stdout)
+        self.assertEqual(after["latest_patch_hook_fired"], newer_tag)
+        self.assertEqual(after["latest"], newer_tag)
+        self.assertEqual(
+            {release["tag_name"] for release in after["releases"] if release["tag_name"].startswith("v")},
+            {old_tag, newer_tag},
+        )
+        for stable_release in after["releases"]:
+            if stable_release["tag_name"] in stable_dmg_before:
+                stable_dmg_after = next(
+                    a for a in stable_release["assets"] if a["name"].endswith(".dmg")
+                )
+                self.assertEqual(stable_dmg_after, stable_dmg_before[stable_release["tag_name"]])
+
+        latest_true_targets = [
+            next(value for value in call if value.startswith("repos/") and "/releases/" in value)
+            for call in after["calls"]
+            if "--method" in call and call[call.index("--method") + 1] == "PATCH"
+            and "make_latest=true" in call
+        ]
+        self.assertEqual(latest_true_targets, [f"repos/{REPOSITORY}/releases/51", f"repos/{REPOSITORY}/releases/52"])
+        self.assertFalse(any(
+            "make_latest=true" in call and f"releases/{auto_release['id']}" in " ".join(call)
             for call in after["calls"]
         ))
 
