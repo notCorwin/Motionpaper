@@ -30,23 +30,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.statusItem.update(state)
             self.logger.info("Playback state: \(String(describing: state), privacy: .public)")
+            if state == .enabled { self.confirmUpdateLaunch() }
         }
         playback.setEnabled(true)
-        if let commit = Bundle.main.object(forInfoDictionaryKey: "MotionpaperCommit") as? String {
-            do {
-                try PreparedUpdate.confirmLaunch(arguments: CommandLine.arguments, application: Bundle.main.bundleURL,
-                                                  commit: commit, pid: ProcessInfo.processInfo.processIdentifier)
-            } catch {
-                logger.error("Update launch confirmation failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
         #if DEBUG
+        if CommandLine.arguments.contains("--verify-update-launch") {
+            Task { await verifyUpdateLaunch() }
+            return
+        }
         if CommandLine.arguments.contains("--verify-ui") {
             Task { await verifyUI() }
             return
         }
         #endif
         updates.start()
+    }
+
+    private func confirmUpdateLaunch() {
+        guard let commit = Bundle.main.object(forInfoDictionaryKey: "MotionpaperCommit") as? String else { return }
+        do {
+            try PreparedUpdate.confirmLaunch(arguments: CommandLine.arguments, application: Bundle.main.bundleURL,
+                                             commit: commit, pid: ProcessInfo.processInfo.processIdentifier)
+        } catch {
+            logger.error("Update launch confirmation failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func openRepository() {
@@ -79,7 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         playback.setEnabled(false)
         #if DEBUG
-        if CommandLine.arguments.contains("--verify-ui") || CommandLine.arguments.contains("--verify-update-termination") {
+        if CommandLine.arguments.contains("--verify-ui") || CommandLine.arguments.contains("--verify-update-termination")
+            || CommandLine.arguments.contains("--verify-update-launch") {
             verifyTermination()
         }
         #endif

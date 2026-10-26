@@ -24,6 +24,25 @@ extension AppDelegate {
         }
     }
 
+    func verifyUpdateLaunch() async {
+        let deadline = ContinuousClock.now + .seconds(10)
+        do {
+            while playback.state == .starting, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            try FileManager.default.createDirectory(at: verificationOutput, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: [
+                "phase": "readyToQuit", "state": String(describing: playback.state),
+                "pid": ProcessInfo.processInfo.processIdentifier,
+            ])
+            try data.write(to: verificationOutput.appendingPathComponent("verification.json"), options: .atomic)
+            NSApp.terminate(nil)
+        } catch {
+            fputs("Unable to verify update launch: \(error)\n", stderr)
+            exit(1)
+        }
+    }
+
     @MainActor
     func verifyUI() async {
         let output = verificationOutput
