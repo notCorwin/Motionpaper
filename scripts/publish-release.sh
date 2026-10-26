@@ -151,7 +151,11 @@ validate_asset_metadata() {
     [[ $state == uploaded ]] || { echo "error: release asset $asset_name is not uploaded" >&2; return 1; }
     [[ $size =~ ^[1-9][0-9]*$ ]] || { echo "error: release asset $asset_name has an invalid size" >&2; return 1; }
     [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "error: release asset $asset_name has an invalid SHA-256" >&2; return 1; }
-    [[ $browser_url == "$expected_url" ]] || { echo "error: release asset $asset_name has an invalid browser_download_url" >&2; return 1; }
+    # GitHub uses an untagged temporary URL while a release is a draft.
+    # The published validation below requires the final, tag-bound URL.
+    if [[ $(jq -r '.draft' "$json_file") != true ]]; then
+        [[ $browser_url == "$expected_url" ]] || { echo "error: release asset $asset_name has an invalid browser_download_url" >&2; return 1; }
+    fi
 }
 
 validate_update_manifest() {

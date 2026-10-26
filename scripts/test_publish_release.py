@@ -179,6 +179,9 @@ def api():
                 release["draft"] = forms["draft"] == "true"
                 if not release["draft"] and not release.get("published_at"):
                     release["published_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if not release["draft"]:
+                    for item in release["assets"]:
+                        item["browser_download_url"] = f"https://github.com/{state['repository']}/releases/download/{release['tag_name']}/{item['name']}"
             if forms.get("make_latest") == "true":
                 state["latest"] = release["tag_name"]
             save()
@@ -224,6 +227,7 @@ elif args[0] == "release" and len(args) > 1 and args[1] == "upload":
             index += 1
     for path in paths:
         content = path.read_bytes()
+        download_tag = "untagged-draft-fixture" if release["draft"] else tag
         release["assets"] = [a for a in release["assets"] if a["name"] != path.name]
         release["assets"].append({
             "id": max([int(a["id"]) for r in state["releases"] for a in r["assets"]] + [0]) + 1,
@@ -231,7 +235,7 @@ elif args[0] == "release" and len(args) > 1 and args[1] == "upload":
             "size": len(content),
             "digest": "sha256:" + __import__("hashlib").sha256(content).hexdigest(),
             "state": "uploaded",
-            "browser_download_url": f"https://github.com/{state['repository']}/releases/download/{tag}/{path.name}",
+            "browser_download_url": f"https://github.com/{state['repository']}/releases/download/{download_tag}/{path.name}",
             "content": base64.b64encode(content).decode("ascii"),
         })
     save()
