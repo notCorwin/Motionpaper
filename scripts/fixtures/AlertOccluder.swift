@@ -26,7 +26,8 @@ enum AlertOccluder {
             do {
                 try Data().write(to: report.appendingPathExtension("occluder-started"))
                 // The harness activates this app through LaunchServices once it is registered.
-                let launchDeadline = ContinuousClock.now + .seconds(10)
+                // Outlive the harness's ten-second LaunchServices request.
+                let launchDeadline = ContinuousClock.now + .seconds(15)
                 while !FileManager.default.fileExists(atPath: report.appendingPathExtension("occluder-activated").path) {
                     guard ContinuousClock.now < launchDeadline else { throw failure("LaunchServices did not activate the occluder") }
                     try await Task.sleep(for: .milliseconds(20))

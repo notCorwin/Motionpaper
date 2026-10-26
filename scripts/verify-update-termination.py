@@ -71,7 +71,8 @@ def verify_termination(binary, root, quit_sender=None, occluder=None):
             if occluder_process:
                 if json.loads(report.read_text()).get("alertVisible") is not True:
                     raise RuntimeError("The external quit test did not show an update alert")
-                stdout, stderr = occluder_process.communicate(timeout=15)
+                # Three bounded five-second UI transitions need completion/exit margin.
+                stdout, stderr = occluder_process.communicate(timeout=20)
                 if occluder_process.returncode != 0:
                     raise RuntimeError(f"Alert ordering verification failed: {stdout}\n{stderr}")
                 print(stdout.strip())
