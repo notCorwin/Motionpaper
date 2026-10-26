@@ -20,6 +20,7 @@ final class UpdateController {
     var onStableReleaseChange: (@MainActor (UpdateManifest?) -> Void)?
     private let service: UpdateService?
     private let channel: UpdateChannel
+    private let showAlertWindow: @MainActor (NSAlert) -> Void
     private var availableUpdate: UpdateManifest?
     private var availableStableRelease: UpdateManifest?
     private var operation: Task<Void, Never>?
@@ -30,12 +31,15 @@ final class UpdateController {
     private var pendingAlert: UpdateAlert?
     private let logger = Logger(subsystem: "local.motionpaper.app", category: "updates")
 
-    init(service: UpdateService, channel: UpdateChannel) {
+    init(service: UpdateService, channel: UpdateChannel,
+         showAlertWindow: @escaping @MainActor (NSAlert) -> Void = AlertPresentation.show) {
         self.service = service
         self.channel = channel
+        self.showAlertWindow = showAlertWindow
     }
 
     init() {
+        showAlertWindow = AlertPresentation.show
         let bundle = Bundle.main
         channel = UpdateChannel(rawValue: bundle.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String ?? "") ?? .autobuild
         if let commit = bundle.object(forInfoDictionaryKey: "MotionpaperCommit") as? String,
@@ -101,14 +105,11 @@ final class UpdateController {
     }
 
     private func check(userInitiated: Bool) {
-        guard !stopping, operation == nil else { return }
+        guard !stopping, operation == nil, userInitiated || pendingAlert == nil else { return }
+        pendingAlert?.dismiss()
         guard let service else {
             if userInitiated {
-                operation = Task { [weak self] in
-                    guard let self else { return }
-                    defer { operation = nil }
-                    await showAlert("无法检查更新", "请使用构建脚本或 GitHub Release 提供的应用。")
-                }
+                showAlert("无法检查更新", "请使用构建脚本或 GitHub Release 提供的应用。")
             }
             return
         }
@@ -116,14 +117,17 @@ final class UpdateController {
         state = .checking
         operation = Task { [weak self] in
             guard let self else { return }
-            var requestedInstall: UpdateManifest?
-            defer {
-                operation = nil
-                if let requestedInstall, !Task.isCancelled, !stopping { install(requestedInstall, using: service) }
-            }
+            let result: Result<UpdateManifest?, any Error>
             do {
-                let manifest = try await service.check()
-                guard !Task.isCancelled else { return }
+                result = .success(try await service.check())
+            } catch {
+                result = .failure(error)
+            }
+            // A pending modeless prompt must not keep enabled menu actions busy.
+            operation = nil
+            guard !Task.isCancelled, !stopping else { return }
+            switch result {
+            case .success(let manifest):
                 availableUpdate = manifest
                 state = manifest.map(State.available) ?? .idle
                 if userInitiated {
@@ -133,20 +137,19 @@ final class UpdateController {
                         alert.informativeText = "下载完成后将自动安装并重新启动 Motionpaper。"
                         alert.addButton(withTitle: "更新并重新启动")
                         alert.addButton(withTitle: "稍后")
-                        if await presentAlert(alert) == .alertFirstButtonReturn, !Task.isCancelled, !stopping {
-                            requestedInstall = manifest
+                        presentAlert(alert) { [weak self] response in
+                            if response == .alertFirstButtonReturn { self?.install(manifest, using: service) }
                         }
                     } else {
                         let release = channel == .stable ? "正式版" : "Autobuild"
-                        await showAlert("已是最新发布版本", "当前 Motionpaper 已是最新发布的\(release)。")
+                        showAlert("已是最新发布版本", "当前 Motionpaper 已是最新发布的\(release)。")
                     }
                 }
-            } catch {
-                guard !Task.isCancelled else { return }
+            case .failure(let error):
                 availableUpdate = nil
                 state = .idle
                 logger.error("Update check failed: \(error.localizedDescription, privacy: .public)")
-                if userInitiated { await showAlert("无法检查更新", error.localizedDescription) }
+                if userInitiated { showAlert("无法检查更新", error.localizedDescription) }
             }
         }
     }
@@ -172,6 +175,7 @@ final class UpdateController {
 
     private func install(_ manifest: UpdateManifest, using service: UpdateService) {
         guard !stopping, operation == nil else { return }
+        pendingAlert?.dismiss()
         state = .downloading(manifest)
         operation = Task { [weak self] in
             guard let self else { return }
@@ -197,40 +201,42 @@ final class UpdateController {
             } catch {
                 guard !Task.isCancelled else { return }
                 logger.error("Update installation failed: \(error.localizedDescription, privacy: .public)")
-                await showAlert("无法安装更新", error.localizedDescription)
+                showAlert("无法安装更新", error.localizedDescription)
             }
         }
     }
 
-    private func showAlert(_ title: String, _ message: String) async {
+    private func showAlert(_ title: String, _ message: String) {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: "好")
-        _ = await presentAlert(alert)
+        presentAlert(alert)
     }
 
-    private func presentAlert(_ alert: NSAlert) async -> NSApplication.ModalResponse {
-        guard !stopping, !Task.isCancelled else { return .cancel }
-        return await withCheckedContinuation { continuation in
-            pendingAlert?.dismiss()
-            let presentation = UpdateAlert(alert: alert) { [weak self] response in
-                self?.pendingAlert = nil
-                continuation.resume(returning: response)
-            }
-            pendingAlert = presentation
-            presentation.show()
+    private func presentAlert(_ alert: NSAlert,
+                              completion: @escaping @MainActor (NSApplication.ModalResponse) -> Void = { _ in }) {
+        guard !stopping, !Task.isCancelled else { return }
+        pendingAlert?.dismiss()
+        let presentation = UpdateAlert(alert: alert, showWindow: showAlertWindow) { [weak self] response in
+            self?.pendingAlert = nil
+            completion(response)
         }
+        pendingAlert = presentation
+        presentation.show()
     }
 }
 
 @MainActor
 private final class UpdateAlert: NSObject, NSWindowDelegate {
     private let alert: NSAlert
+    private let showWindow: @MainActor (NSAlert) -> Void
     private var completion: (@MainActor (NSApplication.ModalResponse) -> Void)?
 
-    init(alert: NSAlert, completion: @escaping @MainActor (NSApplication.ModalResponse) -> Void) {
+    init(alert: NSAlert, showWindow: @escaping @MainActor (NSAlert) -> Void,
+         completion: @escaping @MainActor (NSApplication.ModalResponse) -> Void) {
         self.alert = alert
+        self.showWindow = showWindow
         self.completion = completion
     }
 
@@ -241,7 +247,7 @@ private final class UpdateAlert: NSObject, NSWindowDelegate {
             button.target = self
             button.action = #selector(selectButton(_:))
         }
-        AlertPresentation.show(alert)
+        showWindow(alert)
     }
 
     @objc private func selectButton(_ button: NSButton) {
