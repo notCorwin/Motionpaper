@@ -6,51 +6,43 @@ import UpdateCore
 private let autobuildCommit = String(repeating: "b", count: 40)
 private let stableCommit = String(repeating: "c", count: 40)
 private let checksum = String(repeating: "a", count: 64)
-private let autobuildURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest")!
-private let stableURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100")!
+private let catalogURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100")!
 
 @Test @MainActor
-func autobuildIsAvailableWhileStableCheckIsPending() async throws {
+func controllerChecksBothChannelsFromOneCatalogRequest() async throws {
     let state = UpdateControllerURLProtocol.state
-    state.reset()
+    state.reset(with: try releasesCatalog())
 
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [UpdateControllerURLProtocol.self]
     let session = URLSession(configuration: configuration)
-    defer {
-        state.releaseStable(with: Data("[]".utf8))
-        session.invalidateAndCancel()
-    }
+    defer { session.invalidateAndCancel() }
 
-    let directory = FileManager.default.temporaryDirectory
-    let service = UpdateService(releaseURL: autobuildURL, currentCommit: String(repeating: "a", count: 40),
-                                channel: .autobuild, directory: directory, session: session)
-    let stableService = UpdateService(releaseURL: stableURL, currentCommit: "unused", channel: .stable,
-                                      directory: directory, session: session)
-    let controller = UpdateController(service: service, stableService: stableService, channel: .autobuild)
+    let service = UpdateService(releaseURL: catalogURL, currentCommit: String(repeating: "a", count: 40),
+                                channel: .autobuild, directory: FileManager.default.temporaryDirectory,
+                                session: session)
+    let controller = UpdateController(service: service, channel: .autobuild)
     var stableChanges: [UpdateManifest?] = []
     controller.onStableReleaseChange = { stableChanges.append($0) }
 
     controller.start()
 
-    #expect(await waitUntil { state.stableRequestURL != nil })
-    #expect(await waitUntil {
+    let resultsArrived = await waitUntil {
+        guard stableChanges.contains(where: { $0?.version?.description == "1.2.3" }) else { return false }
         if case .available = controller.state { return true }
         return false
-    })
-    #expect(state.stableRequestURL == stableURL)
+    }
+    #expect(resultsArrived)
     if case let .available(manifest) = controller.state {
         #expect(manifest.commit == autobuildCommit)
     } else {
-        #expect(Bool(false), "The Autobuild result should be available before the stable response.")
+        #expect(Bool(false), "The background check should make the Autobuild available.")
     }
-    #expect(stableChanges.count == 1)
-    #expect(stableChanges.first.flatMap { $0 } == nil)
-
-    state.releaseStable(with: try stableReleaseList())
-    #expect(await waitUntil { stableChanges.contains { $0 != nil } })
     #expect(stableChanges.count == 2)
+    #expect(stableChanges.first.flatMap { $0 } == nil)
     #expect(stableChanges.last.flatMap { $0?.version?.description } == "1.2.3")
+    #expect(state.requestCount == 1)
+    #expect(state.requestedURLs == [catalogURL])
 
     let shutdown = controller.stop()
     #expect(shutdown != nil)
@@ -59,7 +51,7 @@ func autobuildIsAvailableWhileStableCheckIsPending() async throws {
 
 @MainActor
 private func waitUntil(
-    timeout: Duration = .seconds(1),
+    timeout: Duration = .seconds(2),
     condition: @MainActor () -> Bool
 ) async -> Bool {
     let clock = ContinuousClock()
@@ -71,24 +63,41 @@ private func waitUntil(
     return true
 }
 
-private func stableReleaseList() throws -> Data {
-    let tag = "v1.2.3"
-    let name = "Motionpaper-1.2.3-\(stableCommit.prefix(12)).dmg"
-    let release: [String: Any] = [
-        "tag_name": tag,
-        "target_commitish": stableCommit,
-        "published_at": "2026-10-25T00:00:00Z",
-        "draft": false,
-        "prerelease": false,
-        "assets": [[
-            "name": name,
-            "state": "uploaded",
-            "browser_download_url": "https://github.com/notCorwin/Motionpaper/releases/download/\(tag)/\(name)",
-            "size": 3,
-            "digest": "sha256:\(checksum)",
-        ]],
+private func releasesCatalog() throws -> Data {
+    let autobuildTag = "Autobuild-\(autobuildCommit)"
+    let autobuildName = "Motionpaper-\(autobuildCommit.prefix(12)).dmg"
+    let stableTag = "v1.2.3"
+    let stableName = "Motionpaper-1.2.3-\(stableCommit.prefix(12)).dmg"
+    let releases: [[String: Any]] = [
+        [
+            "tag_name": autobuildTag,
+            "published_at": "2026-10-25T00:00:00Z",
+            "draft": false,
+            "prerelease": false,
+            "assets": [[
+                "name": autobuildName,
+                "state": "uploaded",
+                "browser_download_url": "https://github.com/notCorwin/Motionpaper/releases/download/\(autobuildTag)/\(autobuildName)",
+                "size": 3,
+                "digest": "sha256:\(checksum)",
+            ]],
+        ],
+        [
+            "tag_name": stableTag,
+            "target_commitish": stableCommit,
+            "published_at": "2026-10-25T00:00:00Z",
+            "draft": false,
+            "prerelease": false,
+            "assets": [[
+                "name": stableName,
+                "state": "uploaded",
+                "browser_download_url": "https://github.com/notCorwin/Motionpaper/releases/download/\(stableTag)/\(stableName)",
+                "size": 3,
+                "digest": "sha256:\(checksum)",
+            ]],
+        ],
     ]
-    return try JSONSerialization.data(withJSONObject: [release])
+    return try JSONSerialization.data(withJSONObject: releases)
 }
 
 private final class UpdateControllerURLProtocol: URLProtocol, @unchecked Sendable {
@@ -98,12 +107,7 @@ private final class UpdateControllerURLProtocol: URLProtocol, @unchecked Sendabl
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        if request.url?.path == autobuildURL.path {
-            do { send(try autobuildManifest()) }
-            catch { client?.urlProtocol(self, didFailWithError: error) }
-        } else {
-            Self.state.hold(self, url: request.url)
-        }
+        Self.state.respond(to: self, url: request.url)
     }
 
     override func stopLoading() {}
@@ -119,61 +123,40 @@ private final class UpdateControllerURLProtocol: URLProtocol, @unchecked Sendabl
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)
     }
-
-    private func autobuildManifest() throws -> Data {
-        let tag = "Autobuild-\(autobuildCommit)"
-        let name = "Motionpaper-\(autobuildCommit.prefix(12)).dmg"
-        return try JSONSerialization.data(withJSONObject: [
-            "tag_name": tag,
-            "published_at": "2026-10-25T00:00:00Z",
-            "draft": false,
-            "prerelease": false,
-            "assets": [[
-                "name": name,
-                "state": "uploaded",
-                "browser_download_url": "https://github.com/notCorwin/Motionpaper/releases/download/\(tag)/\(name)",
-                "size": 3,
-                "digest": "sha256:\(checksum)",
-            ]],
-        ])
-    }
 }
 
 private final class UpdateControllerURLProtocolState: @unchecked Sendable {
     private let lock = NSLock()
-    private var heldProtocol: UpdateControllerURLProtocol?
-    private var releasedBody: Data?
-    private var requestedURL: URL?
+    private var responseData = Data()
+    private var urls: [URL] = []
 
-    var stableRequestURL: URL? {
+    var requestCount: Int {
         lock.lock()
         defer { lock.unlock() }
-        return requestedURL
+        return urls.count
     }
 
-    func reset() {
+    var requestedURLs: [URL] {
         lock.lock()
         defer { lock.unlock() }
-        heldProtocol = nil
-        releasedBody = nil
-        requestedURL = nil
+        return urls
     }
 
-    func hold(_ loader: UpdateControllerURLProtocol, url: URL?) {
+    func reset(with data: Data) {
         lock.lock()
-        heldProtocol = loader
-        requestedURL = url
-        let body = releasedBody
-        lock.unlock()
-        if let body { loader.send(body) }
+        defer { lock.unlock() }
+        responseData = data
+        urls = []
     }
 
-    func releaseStable(with body: Data) {
+    func respond(to loader: UpdateControllerURLProtocol, url: URL?) {
         lock.lock()
-        releasedBody = body
-        let loader = heldProtocol
-        heldProtocol = nil
+        if let url { urls.append(url) }
+        let data = responseData
         lock.unlock()
-        loader?.send(body)
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(50)) {
+            loader.send(data)
+        }
     }
 }

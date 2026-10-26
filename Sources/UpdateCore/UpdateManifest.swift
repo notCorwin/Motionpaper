@@ -21,16 +21,14 @@ public struct UpdateManifest: Equatable, Sendable {
     }
 
     public static func decode(_ data: Data, releaseURL: URL) throws -> Self {
-        guard data.count <= 65_536 else { throw UpdateError.invalidManifest }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let release = try decoder.decode(Release.self, from: data)
-        guard let repository = autobuildRepository(in: releaseURL),
+        guard data.count <= 1_048_576,
+              let repository = repository(in: releaseURL) else { throw UpdateError.invalidManifest }
+        let release = try JSONDecoder().decode(Release.self, from: data)
+        guard
               !release.draft, !release.prerelease,
-              release.tagName.hasPrefix("Autobuild-") else { throw UpdateError.invalidManifest }
+              let commit = autobuildCommit(from: release.tagName),
+              let publishedAt = decodeISO8601(release.publishedAt) else { throw UpdateError.invalidManifest }
 
-        let commit = String(release.tagName.dropFirst("Autobuild-".count))
-        guard isHex(commit, count: 40) else { throw UpdateError.invalidManifest }
         let name = "Motionpaper-\(commit.prefix(12)).dmg"
         let assets = release.assets.filter { $0.name == name }
         guard assets.count == 1, let asset = assets.first,
@@ -41,13 +39,37 @@ public struct UpdateManifest: Equatable, Sendable {
         guard isHex(checksum, count: 64), asset.downloadURL.absoluteString == expected else {
             throw UpdateError.invalidManifest
         }
-        return Self(commit: commit, publishedAt: release.publishedAt, downloadURL: asset.downloadURL,
+        return Self(commit: commit, publishedAt: publishedAt, downloadURL: asset.downloadURL,
                     sha256: checksum, size: asset.size)
+    }
+
+    /// Returns the publication date only for a strict, final Autobuild release.
+    static func autobuildPublishedAt(in data: Data) throws -> Date? {
+        guard let release = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let draft = release["draft"] as? Bool,
+              let prerelease = release["prerelease"] as? Bool else { throw UpdateError.invalidManifest }
+        guard !draft, !prerelease,
+              let tagName = release["tag_name"] as? String,
+              autobuildCommit(from: tagName) != nil else { return nil }
+        guard let publishedAt = release["published_at"] as? String,
+              let date = decodeISO8601(publishedAt) else { throw UpdateError.invalidManifest }
+        return date
+    }
+
+    /// Returns the semantic version only for a final, formally versioned release.
+    static func stableVersion(in data: Data) throws -> ReleaseVersion? {
+        guard let release = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let draft = release["draft"] as? Bool,
+              let prerelease = release["prerelease"] as? Bool else { throw UpdateError.invalidManifest }
+        guard !draft, !prerelease,
+              let tagName = release["tag_name"] as? String,
+              tagName.hasPrefix("v") else { return nil }
+        return ReleaseVersion(String(tagName.dropFirst()))
     }
 
     /// Decodes and validates one formal release from the repository's releases list.
     public static func decodeStableRelease(_ data: Data, releaseURL: URL) throws -> Self {
-        guard data.count <= 1_048_576, let repository = stableRepository(in: releaseURL) else {
+        guard data.count <= 1_048_576, let repository = repository(in: releaseURL) else {
             throw UpdateError.invalidManifest
         }
         let release = try JSONDecoder().decode(StableRelease.self, from: data)
@@ -76,18 +98,7 @@ public struct UpdateManifest: Equatable, Sendable {
                     sha256: checksum, size: asset.size, version: version)
     }
 
-    static func autobuildRepository(in releaseURL: URL) -> (owner: String, name: String)? {
-        let components = releaseURL.pathComponents
-        guard components.count == 6, components[1] == "repos",
-              isRepositoryComponent(components[2]), isRepositoryComponent(components[3]),
-              Array(components.suffix(2)) == ["releases", "latest"],
-              releaseURL.absoluteString == "https://api.github.com/repos/\(components[2])/\(components[3])/releases/latest" else {
-            return nil
-        }
-        return (components[2], components[3])
-    }
-
-    static func stableRepository(in releaseURL: URL) -> (owner: String, name: String)? {
+    static func repository(in releaseURL: URL) -> (owner: String, name: String)? {
         let components = releaseURL.pathComponents
         guard components.count == 5, components[1] == "repos",
               isRepositoryComponent(components[2]), isRepositoryComponent(components[3]),
@@ -100,7 +111,7 @@ public struct UpdateManifest: Equatable, Sendable {
 
     private struct Release: Decodable {
         let tagName: String
-        let publishedAt: Date
+        let publishedAt: String
         let draft: Bool
         let prerelease: Bool
         let assets: [Asset]
@@ -150,6 +161,12 @@ public struct UpdateManifest: Equatable, Sendable {
 
     private static func isHex(_ value: String, count: Int) -> Bool {
         value.utf8.count == count && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
+    private static func autobuildCommit(from tagName: String) -> String? {
+        guard tagName.hasPrefix("Autobuild-") else { return nil }
+        let commit = String(tagName.dropFirst("Autobuild-".count))
+        return isHex(commit, count: 40) ? commit : nil
     }
 
     private static func decodeISO8601(_ value: String) -> Date? {

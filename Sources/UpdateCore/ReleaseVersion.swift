@@ -1,6 +1,6 @@
 import Foundation
 
-public enum UpdateChannel: String, Sendable {
+public enum UpdateChannel: String, Hashable, Sendable {
     case autobuild
     case stable
 }

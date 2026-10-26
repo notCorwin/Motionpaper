@@ -18,7 +18,6 @@ final class UpdateController {
     var onStateChange: (@MainActor (State) -> Void)?
     var onStableReleaseChange: (@MainActor (UpdateManifest?) -> Void)?
     private let service: UpdateService?
-    private let stableService: UpdateService?
     private let channel: UpdateChannel
     private var availableUpdate: UpdateManifest?
     private var availableStableRelease: UpdateManifest?
@@ -29,9 +28,8 @@ final class UpdateController {
     private var shutdown: Task<Void, Never>?
     private let logger = Logger(subsystem: "local.motionpaper.app", category: "updates")
 
-    init(service: UpdateService, stableService: UpdateService?, channel: UpdateChannel) {
+    init(service: UpdateService, channel: UpdateChannel) {
         self.service = service
-        self.stableService = stableService
         self.channel = channel
     }
 
@@ -46,17 +44,8 @@ final class UpdateController {
             service = UpdateService(releaseURL: url, currentCommit: commit,
                                     currentVersion: channel == .stable ? bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String : nil,
                                     channel: channel, directory: directory)
-            if channel == .autobuild,
-               let address = bundle.object(forInfoDictionaryKey: "MotionpaperStableUpdateURL") as? String,
-               let stableURL = URL(string: address) {
-                stableService = UpdateService(releaseURL: stableURL, currentCommit: commit, channel: .stable,
-                                              directory: directory)
-            } else {
-                stableService = nil
-            }
         } else {
             service = nil
-            stableService = nil
         }
     }
 
@@ -82,7 +71,7 @@ final class UpdateController {
     }
 
     func installStableRelease() {
-        if let availableStableRelease, let stableService { install(availableStableRelease, using: stableService) }
+        if let availableStableRelease, let service { install(availableStableRelease, using: service) }
     }
 
     func stop() -> Task<Void, Never>? {
@@ -98,9 +87,8 @@ final class UpdateController {
         stable?.cancel()
         stableCheck = nil
         guard checks != nil || pending != nil || stable != nil else { return nil }
-        let shutdown = Task { [service, stableService] in
+        let shutdown = Task { [service] in
             await service?.cancel()
-            await stableService?.cancel()
             await pending?.value
             await stable?.value
             await checks?.value
@@ -156,14 +144,14 @@ final class UpdateController {
     }
 
     private func checkStableRelease() {
-        guard let stableService, stableCheck == nil else { return }
+        guard channel == .autobuild, let service, stableCheck == nil else { return }
         availableStableRelease = nil
         onStableReleaseChange?(nil)
         stableCheck = Task { [weak self] in
             guard let self else { return }
             defer { stableCheck = nil }
             do {
-                let manifest = try await stableService.check()
+                let manifest = try await service.check(channel: .stable)
                 guard !Task.isCancelled, !stopping else { return }
                 availableStableRelease = manifest
                 onStableReleaseChange?(manifest)

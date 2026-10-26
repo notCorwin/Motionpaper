@@ -8,7 +8,8 @@ public actor UpdateService {
     private let channel: UpdateChannel
     private let session: URLSession
     private let directory: URL
-    private var checkRequest: Task<UpdateManifest?, any Error>?
+    private var checkTasks: [UpdateChannel: Task<UpdateManifest?, any Error>] = [:]
+    private var catalogRequest: Task<[Data], any Error>?
     private var downloads: [String: Task<URL, any Error>] = [:]
 
     public init(releaseURL: URL, currentCommit: String, currentVersion: String? = nil,
@@ -21,22 +22,14 @@ public actor UpdateService {
         self.session = session
     }
 
-    public func check() async throws -> UpdateManifest? {
-        if let checkRequest { return try await checkRequest.value }
-        let request = Task { [session, releaseURL, currentCommit, currentVersion, channel] in
-            switch channel {
-            case .autobuild:
-                let (data, _) = try await Self.fetch(releaseURL, session: session, maximumSize: 65_536)
-                let manifest = try UpdateManifest.decode(data, releaseURL: releaseURL)
-                return manifest.commit == currentCommit ? nil : manifest
-            case .stable:
-                return try await Self.checkStable(releaseURL: releaseURL, currentVersion: currentVersion,
-                                                  session: session)
-            }
-        }
-        checkRequest = request
-        defer { checkRequest = nil }
-        return try await request.value
+    public func check(channel requestedChannel: UpdateChannel? = nil) async throws -> UpdateManifest? {
+        let requestedChannel = requestedChannel ?? channel
+        if let task = checkTasks[requestedChannel] { return try await task.value }
+
+        let task = Task { try await self.update(for: requestedChannel) }
+        checkTasks[requestedChannel] = task
+        defer { checkTasks[requestedChannel] = nil }
+        return try await task.value
     }
 
     public func download(_ manifest: UpdateManifest) async throws -> URL {
@@ -64,7 +57,8 @@ public actor UpdateService {
     }
 
     public func cancel() {
-        checkRequest?.cancel()
+        for task in checkTasks.values { task.cancel() }
+        catalogRequest?.cancel()
         for download in downloads.values { download.cancel() }
     }
 
@@ -79,6 +73,96 @@ public actor UpdateService {
             digest.update(data: chunk)
         }
         return digest.finalize().map { String(format: "%02x", $0) }.joined() == manifest.sha256
+    }
+
+    private func update(for channel: UpdateChannel) async throws -> UpdateManifest? {
+        let releases = try await catalog()
+        switch channel {
+        case .autobuild:
+            var latest: (data: Data, publishedAt: Date)?
+            for release in releases {
+                try Task.checkCancellation()
+                guard let publishedAt = try UpdateManifest.autobuildPublishedAt(in: release) else { continue }
+                if latest == nil || publishedAt > latest!.publishedAt {
+                    latest = (release, publishedAt)
+                }
+            }
+            guard let latest else { throw UpdateError.invalidManifest }
+            let manifest = try UpdateManifest.decode(latest.data, releaseURL: releaseURL)
+            return manifest.commit == currentCommit ? nil : manifest
+
+        case .stable:
+            var highestVersion: ReleaseVersion?
+            var latestRelease: Data?
+            for release in releases {
+                try Task.checkCancellation()
+                guard let version = try UpdateManifest.stableVersion(in: release) else { continue }
+                if highestVersion == nil || version > highestVersion! {
+                    highestVersion = version
+                    latestRelease = release
+                }
+            }
+
+            guard let latestRelease else {
+                if currentVersion != nil { throw UpdateError.invalidManifest }
+                return nil
+            }
+            let manifest = try UpdateManifest.decodeStableRelease(latestRelease, releaseURL: releaseURL)
+            guard let currentVersion else { return manifest }
+            guard let current = ReleaseVersion(currentVersion), let latest = manifest.version else {
+                throw UpdateError.invalidManifest
+            }
+            return latest > current ? manifest : nil
+        }
+    }
+
+    private func catalog() async throws -> [Data] {
+        if let catalogRequest { return try await catalogRequest.value }
+        guard let repository = UpdateManifest.repository(in: releaseURL) else {
+            throw UpdateError.invalidManifest
+        }
+
+        let request = Task { [session, releaseURL] in
+            try await Self.fetchCatalog(releaseURL: releaseURL, repository: repository, session: session)
+        }
+        catalogRequest = request
+        defer { catalogRequest = nil }
+        return try await request.value
+    }
+
+    private static func fetchCatalog(releaseURL: URL,
+                                     repository: (owner: String, name: String),
+                                     session: URLSession) async throws -> [Data] {
+        var pageURL = releaseURL
+        var page = 1
+        var releases: [Data] = []
+
+        while true {
+            try Task.checkCancellation()
+            let (data, response) = try await fetch(pageURL, session: session, maximumSize: 1_048_576)
+            let pageReleases: [[String: Any]]
+            do {
+                guard let decoded = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+                      decoded.count <= 100 else { throw UpdateError.invalidManifest }
+                pageReleases = decoded
+            } catch {
+                throw UpdateError.invalidManifest
+            }
+
+            for release in pageReleases {
+                do {
+                    releases.append(try JSONSerialization.data(withJSONObject: release))
+                } catch {
+                    throw UpdateError.invalidManifest
+                }
+            }
+
+            guard let nextPage = try nextPageURL(from: response, repository: repository, currentPage: page) else {
+                return releases
+            }
+            pageURL = nextPage
+            page += 1
+        }
     }
 
     private static func validate(_ response: URLResponse) throws {
@@ -96,54 +180,11 @@ public actor UpdateService {
         guard let response = response as? HTTPURLResponse else { throw UpdateError.invalidManifest }
         var data = Data()
         for try await byte in bytes {
+            try Task.checkCancellation()
             guard data.count < maximumSize else { throw UpdateError.invalidManifest }
             data.append(byte)
         }
         return (data, response)
-    }
-
-    private static func checkStable(releaseURL: URL, currentVersion: String?, session: URLSession) async throws -> UpdateManifest? {
-        guard let repository = UpdateManifest.stableRepository(in: releaseURL) else {
-            throw UpdateError.invalidManifest
-        }
-
-        var pageURL = releaseURL
-        var page = 1
-        var bestVersion: ReleaseVersion?
-        var bestRelease: Data?
-
-        while true {
-            let (data, response) = try await fetch(pageURL, session: session, maximumSize: 1_048_576)
-            guard let releases = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-                  releases.count <= 100 else { throw UpdateError.invalidManifest }
-
-            for release in releases {
-                guard let draft = release["draft"] as? Bool,
-                      let prerelease = release["prerelease"] as? Bool else { throw UpdateError.invalidManifest }
-                guard !draft, !prerelease,
-                      let tag = release["tag_name"] as? String,
-                      tag.hasPrefix("v"),
-                      let version = ReleaseVersion(String(tag.dropFirst())) else { continue }
-                if bestVersion == nil || version > bestVersion! {
-                    bestVersion = version
-                    bestRelease = try JSONSerialization.data(withJSONObject: release)
-                }
-            }
-
-            guard let nextPage = try nextPageURL(from: response, repository: repository, currentPage: page) else {
-                break
-            }
-            pageURL = nextPage
-            page += 1
-        }
-
-        guard let bestRelease else { return nil }
-        let manifest = try UpdateManifest.decodeStableRelease(bestRelease, releaseURL: releaseURL)
-        guard let currentVersion else { return manifest }
-        guard let current = ReleaseVersion(currentVersion), let latest = manifest.version else {
-            throw UpdateError.invalidManifest
-        }
-        return latest > current ? manifest : nil
     }
 
     private static func nextPageURL(from response: HTTPURLResponse,
@@ -163,8 +204,7 @@ public actor UpdateService {
             if relations.contains(where: { $0.split(whereSeparator: \.isWhitespace).contains("next") }) {
                 guard let open = link.firstIndex(of: "<"), let close = link[open...].firstIndex(of: ">"),
                       close > open else { throw UpdateError.invalidManifest }
-                let target = String(link[link.index(after: open)..<close])
-                nextTargets.append(target)
+                nextTargets.append(String(link[link.index(after: open)..<close]))
             }
         }
         guard !nextTargets.isEmpty else { return nil }

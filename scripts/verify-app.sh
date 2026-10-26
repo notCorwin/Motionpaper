@@ -17,7 +17,6 @@ motionpaper_bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion'
 motionpaper_commit=$(/usr/libexec/PlistBuddy -c 'Print :MotionpaperCommit' "$motionpaper_info")
 motionpaper_repository_url=$(/usr/libexec/PlistBuddy -c 'Print :MotionpaperRepositoryURL' "$motionpaper_info")
 motionpaper_update_url=$(/usr/libexec/PlistBuddy -c 'Print :MotionpaperUpdateURL' "$motionpaper_info")
-motionpaper_stable_update_url=$(/usr/libexec/PlistBuddy -c 'Print :MotionpaperStableUpdateURL' "$motionpaper_info")
 case "$motionpaper_channel" in stable|autobuild) ;; *) echo "error: invalid MotionpaperReleaseChannel metadata" >&2; exit 1 ;; esac
 [ "$motionpaper_version" = "$motionpaper_bundle_version" ] || {
     echo "error: CFBundleShortVersionString and CFBundleVersion must match" >&2
@@ -43,16 +42,7 @@ case "$motionpaper_repository" in
     */*) ;;
     *) echo "error: invalid MotionpaperRepositoryURL metadata" >&2; exit 1 ;;
 esac
-motionpaper_expected_stable_url="https://api.github.com/repos/$motionpaper_repository/releases?per_page=100"
-[ "$motionpaper_stable_update_url" = "$motionpaper_expected_stable_url" ] || {
-    echo "error: MotionpaperStableUpdateURL does not match the repository release source" >&2
-    exit 1
-}
-if [ "$motionpaper_channel" = stable ]; then
-    motionpaper_expected_update_url=$motionpaper_expected_stable_url
-else
-    motionpaper_expected_update_url="https://api.github.com/repos/$motionpaper_repository/releases/latest"
-fi
+motionpaper_expected_update_url="https://api.github.com/repos/$motionpaper_repository/releases?per_page=100"
 [ "$motionpaper_update_url" = "$motionpaper_expected_update_url" ] || {
     echo "error: MotionpaperUpdateURL does not match the release channel source" >&2
     exit 1

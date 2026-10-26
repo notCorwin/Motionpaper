@@ -173,9 +173,7 @@ def verify_channel_menus(root, binary, fixture_directory):
             CFBundleShortVersionString="1.0.0",
             MotionpaperReleaseChannel=channel,
             MotionpaperRepositoryURL="https://github.com/notCorwin/Motionpaper",
-            MotionpaperStableUpdateURL=stable_url,
-            MotionpaperUpdateURL=stable_url if channel == "stable" else
-                "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest",
+            MotionpaperUpdateURL=stable_url,
         )
         with information.open("wb") as stream:
             plistlib.dump(metadata, stream)

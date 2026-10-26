@@ -56,12 +56,7 @@ case "$motionpaper_repository" in
 esac
 
 motionpaper_repository_url="https://github.com/$motionpaper_repository"
-motionpaper_stable_update_url="https://api.github.com/repos/$motionpaper_repository/releases?per_page=100"
-if [ "$motionpaper_channel" = stable ]; then
-    motionpaper_update_url=$motionpaper_stable_update_url
-else
-    motionpaper_update_url="https://api.github.com/repos/$motionpaper_repository/releases/latest"
-fi
+motionpaper_update_url="https://api.github.com/repos/$motionpaper_repository/releases?per_page=100"
 swift build -c "$motionpaper_configuration" --arch arm64
 motionpaper_arm64_bin=$(swift build -c "$motionpaper_configuration" --arch arm64 --show-bin-path)
 swift build -c "$motionpaper_configuration" --arch x86_64
@@ -81,7 +76,6 @@ cp Support/Info.plist "$motionpaper_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MotionpaperReleaseChannel $motionpaper_channel" "$motionpaper_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MotionpaperCommit $motionpaper_commit" "$motionpaper_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MotionpaperUpdateURL $motionpaper_update_url" "$motionpaper_app/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :MotionpaperStableUpdateURL $motionpaper_stable_update_url" "$motionpaper_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MotionpaperRepositoryURL $motionpaper_repository_url" "$motionpaper_app/Contents/Info.plist"
 if [ ! -f .build/icon-tools/GenerateIcon ] || [ Tools/GenerateIcon.swift -nt .build/icon-tools/GenerateIcon ]; then
     xcrun swiftc -swift-version 6 Tools/GenerateIcon.swift -o .build/icon-tools/GenerateIcon

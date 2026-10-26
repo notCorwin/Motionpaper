@@ -182,12 +182,9 @@ extension AppDelegate {
         try require(url.scheme == "https" && url.host == "github.com" && url.pathComponents.count == 3)
         let owner = url.pathComponents[1]
         let repository = url.pathComponents[2]
-        let latestURL = "https://api.github.com/repos/\(owner)/\(repository)/releases/latest"
         let releasesURL = "https://api.github.com/repos/\(owner)/\(repository)/releases?per_page=100"
-        let isStableChannel = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable"
         try require(Bundle.main.object(forInfoDictionaryKey: "MotionpaperUpdateURL") as? String
-                    == (isStableChannel ? releasesURL : latestURL))
-        try require(Bundle.main.object(forInfoDictionaryKey: "MotionpaperStableUpdateURL") as? String == releasesURL)
+                    == releasesURL)
     }
 
     private func verifyUpdateMenu() throws {
@@ -264,7 +261,7 @@ extension AppDelegate {
                 "digest": "sha256:\(String(repeating: "b", count: 64))",
             ]],
         ])
-        let releaseURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest")!
+        let releaseURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100")!
         let manifest = try UpdateManifest.decode(data, releaseURL: releaseURL)
         statusItem.update(UpdateController.State.available(manifest))
         let installTitle = "更新并重新启动（aaaaaaaaaaaa）…"

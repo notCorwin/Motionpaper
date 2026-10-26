@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import UpdateCore
 
-private let releaseURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest")!
+private let releaseURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100")!
 private let stableListURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100")!
 private let commit = String(repeating: "a", count: 40)
 private let nextCommit = String(repeating: "b", count: 40)
@@ -65,6 +65,11 @@ private func stableJSON(_ releases: [[String: Any]]) throws -> Data {
     try JSONSerialization.data(withJSONObject: releases)
 }
 
+private func catalogJSON(_ releases: [Data]) throws -> Data {
+    let objects = try releases.map { try JSONSerialization.jsonObject(with: $0) }
+    return try JSONSerialization.data(withJSONObject: objects)
+}
+
 @Test func manifestBindsGitHubReleaseAndArtifactToRepositoryAndCommit() throws {
     let manifest = try UpdateManifest.decode(try releaseData(), releaseURL: releaseURL)
     #expect(manifest.commit == commit)
@@ -85,13 +90,15 @@ private func stableJSON(_ releases: [[String: Any]]) throws -> Data {
     }
 
     for invalidURL in [
-        "http://api.github.com/repos/notCorwin/Motionpaper/releases/latest",
-        "https://github.com/repos/notCorwin/Motionpaper/releases/latest",
-        "https://user@api.github.com/repos/notCorwin/Motionpaper/releases/latest",
-        "https://api.github.com:443/repos/notCorwin/Motionpaper/releases/latest",
-        "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest?preview=1",
-        "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest#latest",
-        "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest/",
+        "http://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100",
+        "https://github.com/repos/notCorwin/Motionpaper/releases?per_page=100",
+        "https://user@api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100",
+        "https://api.github.com:443/repos/notCorwin/Motionpaper/releases?per_page=100",
+        "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100&page=1",
+        "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=99",
+        "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100#latest",
+        "https://api.github.com/repos/notCorwin/Motionpaper/releases/?per_page=100",
+        "https://api.github.com/repos/notCorwin/Motionpaper/releases/latest",
         "https://api.github.com/repos/notCorwin/Motionpaper/releases",
     ] {
         #expect(throws: (any Error).self) {
@@ -126,7 +133,7 @@ private func stableJSON(_ releases: [[String: Any]]) throws -> Data {
         try releaseData(checksum: "bad"),
         try releaseData(size: 0),
         try releaseData(additionalAssets: [duplicate]),
-        try releaseData(body: String(repeating: "x", count: 66_000)),
+        try releaseData(body: String(repeating: "x", count: 1_048_576)),
     ] {
         #expect(throws: (any Error).self) {
             try UpdateManifest.decode(data, releaseURL: releaseURL)
@@ -165,9 +172,7 @@ private func stableJSON(_ releases: [[String: Any]]) throws -> Data {
         try UpdateManifest.decodeStableRelease(data,
             releaseURL: URL(string: "https://api.github.com/repos/another/Motionpaper/releases?per_page=100")!)
     }
-    #expect(throws: (any Error).self) {
-        try UpdateManifest.decodeStableRelease(data, releaseURL: releaseURL)
-    }
+    #expect(throws: (any Error).self) { try UpdateManifest.decode(data, releaseURL: releaseURL) }
 }
 
 @Test func releaseVersionUsesStrictNumericSemanticOrdering() {
@@ -224,7 +229,7 @@ private func stableJSON(_ releases: [[String: Any]]) throws -> Data {
     defer { failureSession.invalidateAndCancel() }
     let failing = UpdateService(releaseURL: releaseURL, currentCommit: commit,
                                 directory: FileManager.default.temporaryDirectory, session: failureSession)
-    HTTPStatusProtocol.setResponse(status: 200, body: try releaseData())
+    HTTPStatusProtocol.setResponse(status: 200, body: try catalogJSON([releaseData()]))
     #expect(try await failing.check() == nil)
     for status in [404, 500, 304] {
         HTTPStatusProtocol.setResponse(status: status, body: Data())
@@ -234,9 +239,9 @@ private func stableJSON(_ releases: [[String: Any]]) throws -> Data {
 
 @Test func repeatedChecksFetchLatestReleaseWithoutConditionalCaching() async throws {
     RefreshProtocol.configure([
-        .init(status: 200, body: try releaseData(commit: commit)),
-        .init(status: 200, body: try releaseData(commit: commit)),
-        .init(status: 200, body: try releaseData(commit: nextCommit)),
+        .init(status: 200, body: try catalogJSON([releaseData(commit: commit)])),
+        .init(status: 200, body: try catalogJSON([releaseData(commit: commit)])),
+        .init(status: 200, body: try catalogJSON([releaseData(commit: nextCommit)])),
     ])
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [RefreshProtocol.self]
@@ -274,6 +279,42 @@ private func stableJSON(_ releases: [[String: Any]]) throws -> Data {
     let results = try await [first, second, third]
     #expect(results.compactMap { $0?.commit } == Array(repeating: commit, count: 3))
     #expect(CoalescingProtocol.requestCount() == 1)
+}
+
+@Test func autobuildAndStableChecksShareOnePagedCatalogButApplyTheirOwnRules() async throws {
+    let olderAutobuild = try releaseData(commit: commit, publishedAt: "2026-10-25T00:00:00Z")
+    let pageOne = try catalogJSON([olderAutobuild])
+    let pageTwo = try catalogJSON([
+        releaseData(commit: nextCommit, publishedAt: "2026-10-26T00:00:00Z"),
+        try JSONSerialization.data(withJSONObject: stableRelease(version: "9.2.0", publishedAt: "2027-01-01T00:00:00Z")),
+    ])
+    let nextPage = "https://api.github.com/repos/notCorwin/Motionpaper/releases?page=2&per_page=100"
+    PagedCatalogProtocol.configure(responses: [
+        .init(body: pageOne, headers: ["Link": "<\(nextPage)>; rel=\"next\""]),
+        .init(body: pageTwo, headers: [:]),
+    ])
+
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [PagedCatalogProtocol.self]
+    let session = URLSession(configuration: configuration)
+    defer { session.invalidateAndCancel() }
+    let service = UpdateService(releaseURL: releaseURL, currentCommit: commit, currentVersion: "1.0.0",
+                                directory: FileManager.default.temporaryDirectory, session: session)
+
+    async let autoCheck = service.check()
+    async let stableCheck = service.check(channel: .stable)
+    let (autobuild, stable) = try await (autoCheck, stableCheck)
+    #expect(autobuild?.commit == nextCommit)
+    #expect(stable?.version == ReleaseVersion("9.2.0"))
+    #expect(PagedCatalogProtocol.requestCount() == 2)
+    #expect(PagedCatalogProtocol.recordedURLs() == [releaseURL.absoluteString, nextPage])
+
+    let stableOnly = try stableJSON([stableRelease(version: "1.0.0")])
+    PagedCatalogProtocol.configure(responses: [.init(body: stableOnly, headers: [:])])
+    let noAutoService = UpdateService(releaseURL: releaseURL, currentCommit: commit,
+                                      directory: FileManager.default.temporaryDirectory, session: session)
+    await #expect(throws: UpdateError.self) { try await noAutoService.check() }
+    #expect(PagedCatalogProtocol.recordedURLs() == [releaseURL.absoluteString])
 }
 
 @Test func stableDiscoveryPaginatesSelectsHighestVersionAndAppliesChannelRules() async throws {
@@ -321,6 +362,13 @@ private func stableJSON(_ releases: [[String: Any]]) throws -> Data {
                                 session: session)
     #expect(try await current.check() == nil)
 
+    StableReleaseProtocol.configure([.init(status: 200, body: try stableJSON([]), headers: [:])])
+    await #expect(throws: UpdateError.self) { try await current.check() }
+    StableReleaseProtocol.configure([.init(status: 200, body: try stableJSON([]), headers: [:])])
+    let noStableYet = UpdateService(releaseURL: stableListURL, currentCommit: commit,
+                                    directory: FileManager.default.temporaryDirectory, session: session)
+    #expect(try await noStableYet.check(channel: .stable) == nil)
+
     StableReleaseProtocol.configure([.init(status: 200, body: try stableJSON([pageTwoRelease]), headers: [:])])
     let newerInstalled = UpdateService(releaseURL: stableListURL, currentCommit: nextCommit, currentVersion: "10.3.0",
                                        channel: .stable, directory: FileManager.default.temporaryDirectory,
@@ -363,7 +411,7 @@ private final class UpdateProtocol: URLProtocol, @unchecked Sendable {
               let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
                                              headerFields: nil) else { return }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: (try? releaseData()) ?? Data())
+        client?.urlProtocol(self, didLoad: (try? catalogJSON([try releaseData()])) ?? Data())
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
@@ -476,7 +524,35 @@ private final class CoalescingProtocol: URLProtocol, @unchecked Sendable {
                   let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
                                                  headerFields: nil) else { return }
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: (try? releaseData()) ?? Data())
+            client?.urlProtocol(self, didLoad: (try? catalogJSON([try releaseData()])) ?? Data())
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+    override func stopLoading() {}
+}
+
+private final class PagedCatalogProtocol: URLProtocol, @unchecked Sendable {
+    struct StubResponse {
+        let body: Data
+        let headers: [String: String]
+    }
+
+    private static let state = PagedCatalogState()
+
+    static func configure(responses: [StubResponse]) { state.configure(responses) }
+    static func requestCount() -> Int { state.requestCount }
+    static func recordedURLs() -> [String?] { state.recordedURLs() }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let stub = Self.state.nextResponse(for: request)
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(150)) { [self] in
+            guard let url = request.url,
+                  let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                                 headerFields: stub.headers) else { return }
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: stub.body)
             client?.urlProtocolDidFinishLoading(self)
         }
     }
@@ -555,5 +631,37 @@ private final class CoalescingProtocolState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         count = 0
+    }
+}
+
+private final class PagedCatalogState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var responses: [PagedCatalogProtocol.StubResponse] = []
+    private var urls: [String?] = []
+
+    var requestCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return urls.count
+    }
+
+    func configure(_ responses: [PagedCatalogProtocol.StubResponse]) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.responses = responses
+        urls = []
+    }
+
+    func recordedURLs() -> [String?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return urls
+    }
+
+    func nextResponse(for request: URLRequest) -> PagedCatalogProtocol.StubResponse {
+        lock.lock()
+        defer { lock.unlock() }
+        urls.append(request.url?.absoluteString)
+        return responses[min(urls.count - 1, responses.count - 1)]
     }
 }
