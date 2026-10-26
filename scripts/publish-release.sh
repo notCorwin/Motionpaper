@@ -352,7 +352,7 @@ validate_published_release() {
 
     if [[ $expected_channel == autobuild || $update_count == 1 ]]; then
         mkdir -p "$validation_dir"
-        gh release download "$expected_tag" --repo "$repository" --pattern update.json --dir "$validation_dir" || return
+        gh release download "$expected_tag" --repo "$repository" --pattern update.json --dir "$validation_dir" --clobber || return
         update_size=$(asset_metadata "$json_file" update.json size)
         update_digest=$(asset_metadata "$json_file" update.json digest)
         downloaded_size=$(file_size "$manifest")

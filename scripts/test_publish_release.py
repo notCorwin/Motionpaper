@@ -290,6 +290,8 @@ elif args[0] == "release" and len(args) > 1 and args[1] == "download":
     if asset is None:
         fail("missing download asset " + pattern)
     destination.mkdir(parents=True, exist_ok=True)
+    if (destination / pattern).exists() and "--clobber" not in options:
+        fail("download destination already exists")
     (destination / pattern).write_bytes(base64.b64decode(asset["content"]))
     save()
 else:
