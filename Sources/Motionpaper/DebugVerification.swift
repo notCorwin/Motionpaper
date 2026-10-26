@@ -29,13 +29,21 @@ extension AppDelegate {
                 Task {
                     let deadline = ContinuousClock.now + .seconds(5)
                     while true {
-                        if let alert = NSApp.windows.first(where: { $0.isVisible && $0.styleMask.contains(.titled) }) {
+                        if NSApp.isActive,
+                           let alert = NSApp.windows.first(where: { $0.isVisible && $0.styleMask.contains(.titled) }) {
+                            guard let value = ProcessInfo.processInfo.environment["MOTIONPAPER_VERIFICATION_FOREGROUND_PID"],
+                                  let pid = Int32(value), let foreground = NSRunningApplication(processIdentifier: pid) else {
+                                fputs("The foreground verification application is missing\n", stderr)
+                                exit(1)
+                            }
+                            // Let the other app take focus only after this alert has activated.
+                            NSApp.yieldActivation(to: foreground)
                             do { try recordReady(alert: alert) }
                             catch { exit(1) }
                             return
                         }
                         guard ContinuousClock.now < deadline else {
-                            fputs("The update alert did not become visible\n", stderr)
+                            fputs("The update alert did not become visible and active\n", stderr)
                             exit(1)
                         }
                         try? await Task.sleep(for: .milliseconds(10))

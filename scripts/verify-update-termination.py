@@ -21,10 +21,11 @@ def verify_termination(binary, root, quit_sender=None, occluder=None):
     resources = contents / "Resources"
     resources.mkdir()
     shutil.copy2(Path(__file__).resolve().parents[1] / "assets" / "AppIcon.png", resources / "StatusIcon.png")
+    bundle_identifier = f"local.motionpaper.termination-test.{uuid.uuid4().hex}"
     with (contents / "Info.plist").open("wb") as stream:
         plistlib.dump(
             {
-                "CFBundleIdentifier": f"local.motionpaper.termination-test.{uuid.uuid4().hex}",
+                "CFBundleIdentifier": bundle_identifier,
                 "CFBundleExecutable": "Motionpaper",
                 "CFBundlePackageType": "APPL",
                 "LSUIElement": True,
@@ -43,7 +44,7 @@ def verify_termination(binary, root, quit_sender=None, occluder=None):
     process = occluder_process = None
     try:
         if occluder:
-            occluder_process = subprocess.Popen([str(occluder), str(report)], stdout=subprocess.PIPE,
+            occluder_process = subprocess.Popen([str(occluder), str(report), bundle_identifier], stdout=subprocess.PIPE,
                                                 stderr=subprocess.PIPE, text=True)
             deadline = time.monotonic() + 5
             while not report.with_suffix(".json.occluder-ready").exists():
@@ -52,6 +53,7 @@ def verify_termination(binary, root, quit_sender=None, occluder=None):
                     stdout, stderr = occluder_process.communicate()
                     raise RuntimeError(f"Occluder did not open: {stdout}\n{stderr}")
                 time.sleep(0.01)
+            environment["MOTIONPAPER_VERIFICATION_FOREGROUND_PID"] = str(occluder_process.pid)
         process = subprocess.Popen(arguments, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if quit_sender:
             deadline = time.monotonic() + 5

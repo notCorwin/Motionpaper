@@ -10,7 +10,7 @@ final class FullScreenObserver: NSObject, NSWindowDelegate {
 enum AlertOccluder {
     @MainActor
     static func main() {
-        guard CommandLine.arguments.count == 2 else { exit(1) }
+        guard CommandLine.arguments.count == 3 else { exit(1) }
         let report = URL(fileURLWithPath: CommandLine.arguments[1])
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
@@ -25,6 +25,7 @@ enum AlertOccluder {
         window.delegate = observer
         Task {
             do {
+                app.yieldActivation(toApplicationWithBundleIdentifier: CommandLine.arguments[2])
                 try Data().write(to: report.appendingPathExtension("occluder-ready"))
                 let deadline = ContinuousClock.now + .seconds(10)
                 while !FileManager.default.fileExists(atPath: report.path) {
@@ -35,11 +36,17 @@ enum AlertOccluder {
                 guard let alertID = data?["alertWindowNumber"] as? Int,
                       let alertPID = data?["pid"] as? Int32 else { throw failure("Missing alert identity") }
 
-                // Steal focus and raise a different application's floating window over the alert's position.
+                // The alert app has yielded activation before publishing its report.
                 app.activate()
                 window.makeKeyAndOrderFront(nil)
                 window.orderFrontRegardless()
-                try await Task.sleep(for: .milliseconds(300))
+                let activationDeadline = ContinuousClock.now + .seconds(5)
+                while !app.isActive || NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                    guard ContinuousClock.now < activationDeadline else {
+                        throw failure("Occluder did not take foreground focus; active=\(app.isActive), foregroundPID=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)")
+                    }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
                 try verifyOrdering(alertID: alertID, alertPID: alertPID, occluder: window)
 
                 window.level = .normal

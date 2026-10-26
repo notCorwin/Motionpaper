@@ -1,24 +1,23 @@
 # Motionpaper
 
-Motionpaper 是一个 Mac 小工具，让系统在解锁后也能播放动态墙纸。
-
 [下载最新版](https://github.com/notCorwin/Motionpaper/releases/latest) · [反馈问题](https://github.com/notCorwin/Motionpaper/issues)
+
+Motionpaper 让 macOS 在解锁后，也能播放动态墙纸。
 
 https://github.com/user-attachments/assets/a7f37a3f-f820-462d-8bcb-70760ef02e4a
 
-## 安装与开始使用
+## 开始使用
 
-项目理论上支持 macOS 15 ~ 27 的系统。安装包通用于 M 系列芯片和 Intel 芯片。**但 macOS 26、macOS 27 尚未进行实机测试。** 
+需要 macOS 15 或更高版本。安装包同时支持 Apple 芯片与 Intel。  
+macOS 26、27 尚未实机验证。
 
-1. 打开 [下载页面](https://github.com/notCorwin/Motionpaper/releases/latest)，在 **Assets（资源）** 中选择以 `.dmg` 结尾的安装包。
-2. 打开安装包，把 **Motionpaper** 拖入 **应用程序（Applications）** 文件夹。
-3. 在访达（Finder）侧边栏，点击安装磁盘旁的 ⏏ 按钮，将它推出。
-4. 在「系统设置 → 墙纸」中选择支持播放的系统动态壁纸，并等待它下载完成。
-5. 从「应用程序」打开 Motionpaper，在屏幕顶部菜单栏找到 **M 图标**。
+1. 打开 [下载页面](https://github.com/notCorwin/Motionpaper/releases/latest)，在 Assets 里选 `.dmg`
+2. 打开安装包，把 Motionpaper 拖进「应用程序」
+3. 从「启动台」打开 Motionpaper，菜单栏出现 **M** 图标即成功。
 
-Motionpaper 没有主窗口，也不会出现在程序坞中。
+Motionpaper 没有主窗口，也不会出现在程序坞。
 
-### 首次打开被系统拦截
+### 无法打开？
 
 当前安装包尚未经过 Apple 公证。如果提示无法验证开发者，可按照 [Apple 官方指引](https://support.apple.com/zh-cn/102445)，在「系统设置 → 隐私与安全性」中选择「仍要打开」。
 
