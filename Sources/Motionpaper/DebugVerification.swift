@@ -92,12 +92,13 @@ extension AppDelegate {
             let versionTitle = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable"
                 ? "Motionpaper \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")"
                 : "Motionpaper Autobuild"
+            let loginTitle = SMAppService.mainApp.status == .enabled ? "随开机自动启动：是" : "随开机自动启动：否"
             guard visibleItems.map(\.title)
-                    == [versionTitle, "", "检查更新", "打开 GitHub 仓库", "", "随开机自动启动", "", "退出 Motionpaper"],
+                    == [versionTitle, "", "检查更新", "打开 GitHub 仓库", "", loginTitle, "", "退出 Motionpaper"],
                   visibleItems.enumerated().filter({ $0.element.isSeparatorItem }).map(\.offset) == [1, 4, 6],
                   visibleItems.first?.isEnabled == false,
                   visibleItems.first?.action == nil,
-                  visibleItems.filter({ $0.title != "随开机自动启动" }).allSatisfy({ $0.state == .off }),
+                  visibleItems.filter({ $0.title != loginTitle }).allSatisfy({ $0.state == .off }),
                   statusItem.symbolView.playbackEnabled,
                   titles.contains(StatusItemController.identifier),
                   let quit = visibleItems.last else {
@@ -151,12 +152,14 @@ extension AppDelegate {
                               userInfo: [NSLocalizedDescriptionKey: "Login item states or repository action are incorrect"])
             }
         }
-        let login = statusItem.menu.item(withTitle: "随开机自动启动")
+        let login = statusItem.menu.items.first { $0.title.hasPrefix("随开机自动启动：") }
         try require(login?.action != nil && login?.target === statusItem)
-        for (status, state) in [(SMAppService.Status.notRegistered, NSControl.StateValue.off),
-                                (.notFound, .off), (.enabled, .on), (.requiresApproval, .mixed)] {
+        for (status, state, title) in [(SMAppService.Status.notRegistered, NSControl.StateValue.off, "随开机自动启动：否"),
+                                      (.notFound, .off, "随开机自动启动：否"),
+                                      (.enabled, .on, "随开机自动启动：是"),
+                                      (.requiresApproval, .mixed, "随开机自动启动：否")] {
             statusItem.updateLaunchAtLogin(status)
-            try require(login?.state == state && login?.isEnabled == true)
+            try require(login?.title == title && login?.state == state && login?.isEnabled == true)
         }
         statusItem.menuWillOpen(statusItem.menu)
         let expected: NSControl.StateValue = switch SMAppService.mainApp.status {

@@ -10,7 +10,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     let symbolView = StatusSymbolView()
     let menu = NSMenu()
     private let errorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let launchAtLoginItem = NSMenuItem(title: "随开机自动启动", action: nil, keyEquivalent: "")
+    private let launchAtLoginItem = NSMenuItem(title: "随开机自动启动：否", action: nil, keyEquivalent: "")
     private let launchAtLogin = LaunchAtLoginController()
     private var isUpdatingLaunchAtLogin = false
     private let updateItem = NSMenuItem(title: "检查更新", action: nil, keyEquivalent: "")
@@ -91,6 +91,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     func updateLaunchAtLogin(_ status: SMAppService.Status) {
+        launchAtLoginItem.title = status == .enabled ? "随开机自动启动：是" : "随开机自动启动：否"
         launchAtLoginItem.state = switch status {
         case .enabled: .on
         case .requiresApproval: .mixed
