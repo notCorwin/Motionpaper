@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import Testing
 import UpdateCore
@@ -33,141 +32,126 @@ struct UpdateControllerTests {
         #expect(stableChanges.count == 2)
         #expect(stableChanges.first.flatMap { $0 } == nil)
         #expect(stableChanges.last.flatMap { $0?.version?.description } == "1.2.3")
-        #expect(fixture.protocolState.requestCount == 1)
+        #expect(fixture.protocolState.catalogRequestCount == 1)
         #expect(fixture.protocolState.requestedURLs == [catalogURL])
 
-        let shutdown = fixture.controller.stop()
-        #expect(shutdown != nil)
-        if let shutdown { await shutdown.value }
-        fixture.invalidateSession()
+        await fixture.stopController()
     }
 
     @Test
-    func manualCheckDismissesPendingPromptAndStartsAnotherCheck() async throws {
+    func manualCheckShowsAvailableUpdate() async throws {
         let fixture = try UpdateControllerFixture()
 
         fixture.controller.checkForUpdates()
-        let firstPromptArrived = await fixture.waitForAvailablePrompt(count: 1)
-        #expect(firstPromptArrived)
-        guard let firstPrompt = fixture.alerts.first else {
-            await fixture.stopController()
-            return
+        let updateArrived = await waitUntil { isAvailable(fixture.controller.state) }
+        #expect(updateArrived)
+        if case let .available(manifest) = fixture.controller.state {
+            #expect(manifest.commit == autobuildCommit)
+            #expect(manifest.version == nil)
+        } else {
+            #expect(Bool(false), "A newer Autobuild should be available.")
         }
-        #expect(firstPrompt.window.delegate != nil)
-        #expect(fixture.protocolState.requestCount == 1)
-
-        fixture.controller.checkForUpdates()
-
-        #expect(isChecking(fixture.controller.state))
-        #expect(firstPrompt.window.delegate == nil)
-
-        // A dismissed prompt must no longer be able to install its manifest.
-        firstPrompt.buttons[0].performClick(nil)
-        #expect(isChecking(fixture.controller.state))
-
-        let secondPromptArrived = await fixture.waitForAvailablePrompt(count: 2, requestCount: 2)
-        #expect(secondPromptArrived)
-        #expect(fixture.protocolState.requestCount == 2)
-        #expect(fixture.alerts.count == 2)
-        #expect(isAvailable(fixture.controller.state))
 
         await fixture.stopController()
     }
 
     @Test
-    func installActionDismissesPendingPromptAndStartsOneInstall() async throws {
-        let fixture = try UpdateControllerFixture()
+    func manualCheckShowsUpToDateWhenNoUpdateIsAvailable() async throws {
+        let fixture = try UpdateControllerFixture(currentCommit: autobuildCommit)
 
         fixture.controller.checkForUpdates()
-        let promptArrived = await fixture.waitForAvailablePrompt()
-        #expect(promptArrived)
-        guard let prompt = fixture.alerts.first else {
-            await fixture.stopController()
-            return
-        }
-        #expect(prompt.window.delegate != nil)
+        let isUpToDate = await waitUntil { isUpToDateState(fixture.controller.state) }
+        #expect(isUpToDate)
 
-        var downloadingTransitions = 0
-        fixture.controller.onStateChange = { state in
-            if case .downloading = state { downloadingTransitions += 1 }
-        }
-
-        fixture.controller.installAvailableUpdate()
-        fixture.controller.installAvailableUpdate()
-
-        #expect(isDownloading(fixture.controller.state))
-        #expect(downloadingTransitions == 1)
-        #expect(prompt.window.delegate == nil)
-
-        // The controller is stopped before yielding so no real download or install can run.
         await fixture.stopController()
-        #expect(downloadingTransitions == 1)
     }
 
     @Test
-    func firstPromptButtonStartsOneInstall() async throws {
-        let fixture = try UpdateControllerFixture()
+    func failedCheckCanBeRetried() async throws {
+        let fixture = try UpdateControllerFixture(catalog: Data("not a release catalog".utf8))
 
         fixture.controller.checkForUpdates()
-        let promptArrived = await fixture.waitForAvailablePrompt()
-        #expect(promptArrived)
-        guard let prompt = fixture.alerts.first else {
+        let firstFailureArrived = await waitUntil { checkFailure(fixture.controller.state) != nil }
+        #expect(firstFailureArrived)
+        guard let firstFailure = checkFailure(fixture.controller.state) else {
             await fixture.stopController()
             return
         }
-        #expect(prompt.window.delegate != nil)
+        #expect(!firstFailure.isEmpty)
+        #expect(fixture.protocolState.catalogRequestCount == 1)
 
-        var downloadingTransitions = 0
-        fixture.controller.onStateChange = { state in
-            if case .downloading = state { downloadingTransitions += 1 }
-        }
+        fixture.protocolState.setCatalog(try releasesCatalog())
+        fixture.controller.checkForUpdates()
+        let retrySucceeded = await waitUntil { isAvailable(fixture.controller.state) }
+        #expect(retrySucceeded)
+        #expect(fixture.protocolState.catalogRequestCount == 2)
 
-        prompt.buttons[0].performClick(nil)
-        prompt.buttons[0].performClick(nil)
-        fixture.controller.installAvailableUpdate()
-
-        #expect(isDownloading(fixture.controller.state))
-        #expect(downloadingTransitions == 1)
-        #expect(prompt.window.delegate == nil)
-
-        // Cancel the newly started task synchronously, before it can touch the filesystem or network.
         await fixture.stopController()
-        #expect(downloadingTransitions == 1)
     }
 
     @Test
-    func choosingLaterAllowsAnotherCheckWithoutInstalling() async throws {
+    func installationFailureRecordedDuringCheckAppearsAfterTheCheckAndIsConsumedOnce() async throws {
         let fixture = try UpdateControllerFixture()
-
-        fixture.controller.checkForUpdates()
-        let firstPromptArrived = await fixture.waitForAvailablePrompt()
-        #expect(firstPromptArrived)
-        guard let firstPrompt = fixture.alerts.first else {
-            await fixture.stopController()
-            return
-        }
-        #expect(firstPrompt.window.delegate != nil)
-
-        var downloadingTransitions = 0
-        fixture.controller.onStateChange = { state in
-            if case .downloading = state { downloadingTransitions += 1 }
-        }
-
-        firstPrompt.buttons[1].performClick(nil)
-
-        #expect(firstPrompt.window.delegate == nil)
-        #expect(isAvailable(fixture.controller.state))
-        #expect(downloadingTransitions == 0)
+        let application = Bundle.main.bundleURL
+        try UpdateInstallationFailure.clear(application: application)
+        defer { try? UpdateInstallationFailure.clear(application: application) }
 
         fixture.controller.checkForUpdates()
         #expect(isChecking(fixture.controller.state))
 
-        let secondPromptArrived = await fixture.waitForAvailablePrompt(count: 2, requestCount: 2)
-        #expect(secondPromptArrived)
-        #expect(fixture.protocolState.requestCount == 2)
-        #expect(fixture.alerts.count == 2)
-        #expect(isAvailable(fixture.controller.state))
-        #expect(downloadingTransitions == 0)
+        let message = "The previous installation could not launch"
+        try UpdateInstallationFailure.record(message: message, application: application)
+        fixture.controller.refreshInstallationFailure()
+        #expect(isChecking(fixture.controller.state))
+
+        let reportWasPublished = await waitUntil {
+            guard case let .installFailed(manifest, failure) = fixture.controller.state else { return false }
+            return manifest == nil && failure == message
+        }
+        #expect(reportWasPublished)
+        #expect(try UpdateInstallationFailure.consume(application: application) == nil)
+
+        await fixture.stopController()
+    }
+
+    @Test
+    func failedInstallCanBeRetriedOnceWithTheSameManifest() async throws {
+        let fixture = try UpdateControllerFixture()
+        fixture.controller.checkForUpdates()
+        let updateArrived = await waitUntil { isAvailable(fixture.controller.state) }
+        #expect(updateArrived)
+        guard case let .available(manifest) = fixture.controller.state else {
+            await fixture.stopController()
+            return
+        }
+
+        var downloadingManifests: [UpdateManifest] = []
+        fixture.controller.onStateChange = { state in
+            if case let .downloading(manifest) = state { downloadingManifests.append(manifest) }
+        }
+
+        fixture.controller.installAvailableUpdate()
+        fixture.controller.installAvailableUpdate()
+        #expect(downloadingManifests == [manifest])
+
+        let firstFailureArrived = await waitUntil { installationFailure(fixture.controller.state) != nil }
+        #expect(firstFailureArrived)
+        guard let firstFailure = installationFailure(fixture.controller.state) else {
+            await fixture.stopController()
+            return
+        }
+        #expect(firstFailure.manifest == manifest)
+        #expect(!firstFailure.message.isEmpty)
+        #expect(fixture.protocolState.requestedURLs == [catalogURL])
+
+        fixture.controller.installAvailableUpdate()
+        fixture.controller.installAvailableUpdate()
+        #expect(downloadingManifests == [manifest, manifest])
+
+        let secondFailureArrived = await waitUntil { installationFailure(fixture.controller.state) != nil }
+        #expect(secondFailureArrived)
+        #expect(installationFailure(fixture.controller.state)?.manifest == manifest)
+        #expect(fixture.protocolState.requestedURLs == [catalogURL])
 
         await fixture.stopController()
     }
@@ -178,51 +162,40 @@ private final class UpdateControllerFixture {
     let protocolState = UpdateControllerURLProtocol.state
     let session: URLSession
     let controller: UpdateController
-    private let alertRecorder: UpdateControllerAlertRecorder
+    private let directory: URL
 
-    var alerts: [NSAlert] { alertRecorder.alerts }
-
-    init() throws {
-        NSApplication.shared.setActivationPolicy(.prohibited)
-        protocolState.reset(with: try releasesCatalog())
+    init(currentCommit: String = String(repeating: "a", count: 40), catalog: Data? = nil) throws {
+        let catalogData: Data
+        if let catalog { catalogData = catalog }
+        else { catalogData = try releasesCatalog() }
+        protocolState.reset(with: catalogData)
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [UpdateControllerURLProtocol.self]
         session = URLSession(configuration: configuration)
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("motionpaper-update-controller-\(UUID().uuidString)", isDirectory: true)
 
-        let service = UpdateService(releaseURL: catalogURL, currentCommit: String(repeating: "a", count: 40),
-                                    channel: .autobuild, directory: FileManager.default.temporaryDirectory,
-                                    session: session)
-        let recorder = UpdateControllerAlertRecorder()
-        alertRecorder = recorder
-        controller = UpdateController(service: service, channel: .autobuild) { alert in
-            recorder.alerts.append(alert)
-        }
-    }
-
-    func waitForAvailablePrompt(count: Int = 1, requestCount: Int? = nil) async -> Bool {
-        await waitUntil {
-            alerts.count >= count && isAvailable(controller.state)
-                && (requestCount.map { protocolState.requestCount >= $0 } ?? true)
-        }
+        let service = UpdateService(releaseURL: catalogURL, currentCommit: currentCommit,
+                                    channel: .autobuild, directory: directory, session: session)
+        controller = UpdateController(service: service, channel: .autobuild)
     }
 
     func stopController() async {
         if let shutdown = controller.stop() { await shutdown.value }
         session.invalidateAndCancel()
+        try? FileManager.default.removeItem(at: directory)
     }
-
-    func invalidateSession() { session.invalidateAndCancel() }
 }
 
-@MainActor
-private final class UpdateControllerAlertRecorder {
-    var alerts: [NSAlert] = []
+private struct InstallationFailure {
+    let manifest: UpdateManifest?
+    let message: String
 }
 
 @MainActor
 private func waitUntil(
-    timeout: Duration = .seconds(2),
+    timeout: Duration = .seconds(3),
     condition: @MainActor () -> Bool
 ) async -> Bool {
     let clock = ContinuousClock()
@@ -235,21 +208,35 @@ private func waitUntil(
 }
 
 @MainActor
-private func isChecking(_ state: UpdateController.State) -> Bool {
-    if case .checking = state { return true }
-    return false
-}
-
-@MainActor
 private func isAvailable(_ state: UpdateController.State) -> Bool {
     if case .available = state { return true }
     return false
 }
 
 @MainActor
-private func isDownloading(_ state: UpdateController.State) -> Bool {
-    if case .downloading = state { return true }
+private func isChecking(_ state: UpdateController.State) -> Bool {
+    if case .checking = state { return true }
     return false
+}
+
+@MainActor
+private func isUpToDateState(_ state: UpdateController.State) -> Bool {
+    if case .upToDate = state { return true }
+    return false
+}
+
+@MainActor
+private func checkFailure(_ state: UpdateController.State) -> String? {
+    if case let .checkFailed(message) = state { return message }
+    return nil
+}
+
+@MainActor
+private func installationFailure(_ state: UpdateController.State) -> InstallationFailure? {
+    if case let .installFailed(manifest, message) = state {
+        return InstallationFailure(manifest: manifest, message: message)
+    }
+    return nil
 }
 
 private func releasesCatalog() throws -> Data {
@@ -301,9 +288,8 @@ private final class UpdateControllerURLProtocol: URLProtocol, @unchecked Sendabl
 
     override func stopLoading() {}
 
-    func send(_ data: Data) {
-        guard let url = request.url,
-              let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+    func send(_ data: Data, url: URL) {
+        guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
                                              headerFields: ["Content-Type": "application/json"]) else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
@@ -312,17 +298,21 @@ private final class UpdateControllerURLProtocol: URLProtocol, @unchecked Sendabl
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)
     }
+
+    func fail(_ error: any Error) {
+        client?.urlProtocol(self, didFailWithError: error)
+    }
 }
 
 private final class UpdateControllerURLProtocolState: @unchecked Sendable {
     private let lock = NSLock()
-    private var responseData = Data()
+    private var catalogData = Data()
     private var urls: [URL] = []
 
-    var requestCount: Int {
+    var catalogRequestCount: Int {
         lock.lock()
         defer { lock.unlock() }
-        return urls.count
+        return urls.filter { $0 == catalogURL }.count
     }
 
     var requestedURLs: [URL] {
@@ -334,18 +324,28 @@ private final class UpdateControllerURLProtocolState: @unchecked Sendable {
     func reset(with data: Data) {
         lock.lock()
         defer { lock.unlock() }
-        responseData = data
+        catalogData = data
         urls = []
+    }
+
+    func setCatalog(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        catalogData = data
     }
 
     func respond(to loader: UpdateControllerURLProtocol, url: URL?) {
         lock.lock()
         if let url { urls.append(url) }
-        let data = responseData
+        let data = catalogData
         lock.unlock()
 
+        guard let url, url == catalogURL else {
+            loader.fail(URLError(.unsupportedURL))
+            return
+        }
         DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(50)) {
-            loader.send(data)
+            loader.send(data, url: url)
         }
     }
 }

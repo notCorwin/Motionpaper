@@ -1,5 +1,4 @@
 import AppKit
-import AppUI
 import Darwin
 import OSLog
 import UpdateCore
@@ -12,6 +11,8 @@ enum MotionpaperUpdater {
         guard arguments.count == 3, let pid = Int32(arguments[2]), pid > 0 else { return }
         let logger = Logger(subsystem: "local.motionpaper.app", category: "installer")
         var prepared: PreparedUpdate?
+        var applicationToReport: URL?
+        var parentExited = false
         do {
             let directory = URL(fileURLWithPath: arguments[1], isDirectory: true)
             let update = try PreparedUpdate.load(from: directory)
@@ -22,7 +23,10 @@ enum MotionpaperUpdater {
                   parent.bundleURL?.resolvingSymlinksInPath() == update.destination else {
                 throw UpdateError.installerUnavailable
             }
+            applicationToReport = update.destination
+            try UpdateInstallationFailure.clear(application: update.destination)
             try waitForExit(of: pid, ready: update.ready)
+            parentExited = true
             guard (try? Data(contentsOf: update.authorization)) == Data(update.commit.utf8) else {
                 update.discard()
                 return
@@ -52,13 +56,21 @@ enum MotionpaperUpdater {
             default: prepared?.discard()
             }
             logger.error("Installation failed: \(error.localizedDescription, privacy: .public)")
-            let app = NSApplication.shared
-            app.setActivationPolicy(.accessory)
-            let alert = NSAlert()
-            alert.messageText = "无法安装更新"
-            alert.informativeText = error.localizedDescription
-            alert.addButton(withTitle: "好")
-            AlertPresentation.runModal(alert)
+            guard let application = applicationToReport, prepared != nil || parentExited else { return }
+            do {
+                try UpdateInstallationFailure.record(message: error.localizedDescription, application: application)
+            } catch {
+                logger.error("Could not persist installation failure for \(application.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+            guard parentExited else { return }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = false
+            configuration.createsNewApplicationInstance = false
+            do {
+                _ = try await NSWorkspace.shared.openApplication(at: application, configuration: configuration)
+            } catch {
+                logger.error("Could not reopen Motionpaper after installation failure at \(application.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 

@@ -12,7 +12,6 @@ let package = Package(
         .executable(name: "MotionpaperUpdater", targets: ["MotionpaperUpdater"]),
     ],
     targets: [
-        .target(name: "AppUI"),
         .target(name: "PlaybackCore"),
         .target(name: "UpdateCore"),
         .target(
@@ -20,10 +19,10 @@ let package = Package(
             dependencies: ["PlaybackCore"],
             linkerSettings: [.unsafeFlags(["-Xlinker", "-weak_library", "-Xlinker", "\(root)/Support/Wallpaper.tbd"])]
         ),
-        .executableTarget(name: "MotionpaperUpdater", dependencies: ["AppUI", "UpdateCore"]),
+        .executableTarget(name: "MotionpaperUpdater", dependencies: ["UpdateCore"]),
         .executableTarget(
             name: "Motionpaper",
-            dependencies: ["AppUI", "PlaybackCore", "UpdateCore", "WallpaperCore"]
+            dependencies: ["PlaybackCore", "UpdateCore", "WallpaperCore"]
         ),
         .testTarget(name: "PlaybackCoreTests", dependencies: ["PlaybackCore"]),
         .testTarget(name: "UpdateCoreTests", dependencies: ["UpdateCore"]),

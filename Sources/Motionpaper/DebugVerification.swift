@@ -10,43 +10,67 @@ extension AppDelegate {
     }
 
     func verifyUpdateTermination() {
-        func recordReady(alert: NSWindow? = nil) throws {
+        func recordReady(menuOnlyVerified: Bool = false, updateTitle: String? = nil,
+                         updateToolTip: String? = nil, visibleTitledWindows: Int? = nil) throws {
             var observations: [String: Any] = [
                 "phase": "readyToQuit", "pid": ProcessInfo.processInfo.processIdentifier,
-                "alertVisible": alert?.isVisible == true,
+                "menuOnlyVerified": menuOnlyVerified,
             ]
-            if let alert {
-                observations["alertWindowNumber"] = alert.windowNumber
-            }
+            if let updateTitle { observations["updateMenuTitle"] = updateTitle }
+            if let updateToolTip { observations["updateMenuToolTip"] = updateToolTip }
+            if let visibleTitledWindows { observations["visibleTitledWindows"] = visibleTitledWindows }
             let data = try JSONSerialization.data(withJSONObject: observations)
             try data.write(to: verificationOutput.appendingPathComponent("verification.json"), options: .atomic)
         }
         do {
             try FileManager.default.createDirectory(at: verificationOutput, withIntermediateDirectories: true)
+            updates.onStateChange = { [weak self] state in self?.statusItem.update(state) }
+            statusItem.onMenuWillOpen = { [weak self] in self?.updates.refreshInstallationFailure() }
             updates.start()
-            if CommandLine.arguments.contains("--verify-alert-termination") {
-                updates.checkForUpdates()
-                Task {
-                    let deadline = ContinuousClock.now + .seconds(5)
-                    while true {
-                        if NSApp.isActive,
-                           let alert = NSApp.windows.first(where: { $0.isVisible && $0.styleMask.contains(.titled) }) {
-                            guard let value = ProcessInfo.processInfo.environment["MOTIONPAPER_VERIFICATION_FOREGROUND_PID"],
-                                  let pid = Int32(value), let foreground = NSRunningApplication(processIdentifier: pid) else {
-                                fputs("The foreground verification application is missing\n", stderr)
-                                exit(1)
+            if CommandLine.arguments.contains("--verify-menu-only") {
+                Task { @MainActor in
+                    do {
+                        @MainActor
+                        func waitForCheckFailure() async throws -> String {
+                            let deadline = ContinuousClock.now + .seconds(5)
+                            while ContinuousClock.now < deadline {
+                                if case let .checkFailed(message) = updates.state { return message }
+                                try await Task.sleep(for: .milliseconds(10))
                             }
-                            // Let the other app take focus only after this alert has activated.
-                            NSApp.yieldActivation(to: foreground)
-                            do { try recordReady(alert: alert) }
-                            catch { exit(1) }
-                            return
+                            throw NSError(domain: "MotionpaperVerification", code: 9,
+                                          userInfo: [NSLocalizedDescriptionKey: "The update check did not expose a retry state"])
                         }
-                        guard ContinuousClock.now < deadline else {
-                            fputs("The update alert did not become visible and active; active=\(NSApp.isActive), foregroundPID=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)\n", stderr)
-                            exit(1)
+
+                        _ = try await waitForCheckFailure()
+                        updates.checkForUpdates()
+                        guard case .checking = updates.state else {
+                            throw NSError(domain: "MotionpaperVerification", code: 10,
+                                          userInfo: [NSLocalizedDescriptionKey: "The update failure did not allow a manual recheck"])
                         }
-                        try? await Task.sleep(for: .milliseconds(10))
+                        let message = try await waitForCheckFailure()
+                        statusItem.update(.idle)
+                        try verifyUpdateMenu()
+                        let failure = UpdateController.State.checkFailed(message)
+                        statusItem.update(failure)
+                        statusItem.menuWillOpen(statusItem.menu)
+                        guard let updateItem = statusItem.menu.item(withTitle: "检查更新失败，重试"),
+                              updateItem.isEnabled, updateItem.toolTip == message else {
+                            throw NSError(domain: "MotionpaperVerification", code: 11,
+                                          userInfo: [NSLocalizedDescriptionKey: "The failed check did not appear as a retryable menu item"])
+                        }
+                        let visibleTitledWindows = NSApp.windows.filter {
+                            $0.isVisible && $0.styleMask.contains(.titled)
+                        }.count
+                        guard visibleTitledWindows == 0 else {
+                            throw NSError(domain: "MotionpaperVerification", code: 12,
+                                          userInfo: [NSLocalizedDescriptionKey: "Menu-only update verification opened a titled window"])
+                        }
+                        try recordReady(menuOnlyVerified: true, updateTitle: updateItem.title,
+                                        updateToolTip: updateItem.toolTip,
+                                        visibleTitledWindows: visibleTitledWindows)
+                    } catch {
+                        fputs("Unable to verify menu-only update behavior: \(error)\n", stderr)
+                        exit(1)
                     }
                 }
                 return
@@ -151,10 +175,19 @@ extension AppDelegate {
             let versionTitle = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable"
                 ? "Motionpaper \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")"
                 : "Motionpaper Autobuild"
-            let loginTitle = SMAppService.mainApp.status == .enabled ? "随开机自动启动：是" : "随开机自动启动：否"
-            guard visibleItems.map(\.title)
-                    == [versionTitle, "", "检查更新", "打开 GitHub 仓库", "", loginTitle, "", "退出 Motionpaper"],
-                  visibleItems.enumerated().filter({ $0.element.isSeparatorItem }).map(\.offset) == [1, 4, 6],
+            let loginStatus = SMAppService.mainApp.status
+            let loginTitle: String
+            switch loginStatus {
+            case .enabled: loginTitle = "随开机自动启动：是"
+            case .requiresApproval: loginTitle = "随开机自动启动：等待允许"
+            default: loginTitle = "随开机自动启动：否"
+            }
+            var expectedMenuItems = [versionTitle, "", "检查更新", "打开 GitHub 仓库", "", loginTitle]
+            if loginStatus == .requiresApproval { expectedMenuItems.append("在系统设置中允许开机启动") }
+            expectedMenuItems.append(contentsOf: ["", "退出 Motionpaper"])
+            let separatorOffsets = loginStatus == .requiresApproval ? [1, 4, 7] : [1, 4, 6]
+            guard visibleItems.map(\.title) == expectedMenuItems,
+                  visibleItems.enumerated().filter({ $0.element.isSeparatorItem }).map(\.offset) == separatorOffsets,
                   visibleItems.first?.isEnabled == false,
                   visibleItems.first?.action == nil,
                   visibleItems.allSatisfy({ $0.state == .off }),
@@ -203,9 +236,12 @@ extension AppDelegate {
     private func verifyApplicationMenu() throws {
         let originalOpen = statusItem.onOpenRepository
         let originalRetry = statusItem.onRetryPlayback
+        let originalMenuWillOpen = statusItem.onMenuWillOpen
         defer {
             statusItem.onOpenRepository = originalOpen
             statusItem.onRetryPlayback = originalRetry
+            statusItem.onMenuWillOpen = originalMenuWillOpen
+            statusItem.updateRepositoryError(nil)
             statusItem.update(playback.state)
             statusItem.menuWillOpen(statusItem.menu)
         }
@@ -217,25 +253,54 @@ extension AppDelegate {
         }
         let login = statusItem.menu.items.first { $0.title.hasPrefix("随开机自动启动：") }
         try require(login?.action != nil && login?.target === statusItem)
+        guard let approvalItem = statusItem.menu.item(withTitle: "在系统设置中允许开机启动") else {
+            try require(false)
+            return
+        }
         let approvalTip = "请在系统设置的「通用 → 登录项与扩展」中允许 Motionpaper；再次点击可取消。"
-        let statuses: [(SMAppService.Status, String, String?)] = [
-            (.notRegistered, "随开机自动启动：否", nil),
-            (.notFound, "随开机自动启动：否", nil),
-            (.enabled, "随开机自动启动：是", nil),
-            (.requiresApproval, "随开机自动启动：否", approvalTip),
+        let statuses: [(SMAppService.Status, String, String?, Bool)] = [
+            (.notRegistered, "随开机自动启动：否", nil, false),
+            (.notFound, "随开机自动启动：否", nil, false),
+            (.enabled, "随开机自动启动：是", nil, false),
+            (.requiresApproval, "随开机自动启动：等待允许", approvalTip, true),
         ]
-        for (status, title, toolTip) in statuses {
+        for (status, title, toolTip, showsApproval) in statuses {
             statusItem.updateLaunchAtLogin(status)
             try require(login?.title == title && login?.state == .off && login?.isEnabled == true
-                        && login?.toolTip == toolTip)
+                        && login?.toolTip == toolTip
+                        && approvalItem.title == "在系统设置中允许开机启动"
+                        && approvalItem.isHidden == !showsApproval)
         }
         statusItem.menuWillOpen(statusItem.menu)
-        let actualLoginTitle = SMAppService.mainApp.status == .enabled ? "随开机自动启动：是" : "随开机自动启动：否"
-        try require(login?.title == actualLoginTitle && login?.state == .off)
+        let actualLoginStatus = SMAppService.mainApp.status
+        let actualLoginTitle: String
+        switch actualLoginStatus {
+        case .enabled: actualLoginTitle = "随开机自动启动：是"
+        case .requiresApproval: actualLoginTitle = "随开机自动启动：等待允许"
+        default: actualLoginTitle = "随开机自动启动：否"
+        }
+        try require(login?.title == actualLoginTitle && login?.state == .off
+                    && approvalItem.isHidden == (actualLoginStatus != .requiresApproval))
+        var menuOpenings = 0
+        statusItem.onMenuWillOpen = { menuOpenings += 1 }
+        statusItem.menuWillOpen(statusItem.menu)
+        try require(menuOpenings == 1)
+
         var opens = 0
         statusItem.onOpenRepository = { opens += 1 }
         statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: "打开 GitHub 仓库"))
         try require(opens == 1)
+        let repositoryError = "The repository could not be opened"
+        statusItem.updateRepositoryError(repositoryError)
+        guard let retryRepository = statusItem.menu.item(withTitle: "无法打开仓库，重试") else {
+            try require(false)
+            return
+        }
+        try require(retryRepository.isEnabled && retryRepository.toolTip == repositoryError)
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: retryRepository))
+        try require(opens == 2)
+        statusItem.updateRepositoryError(nil)
+        try require(retryRepository.title == "打开 GitHub 仓库" && retryRepository.toolTip == nil)
 
         var retries = 0
         statusItem.onRetryPlayback = { retries += 1 }
@@ -290,6 +355,35 @@ extension AppDelegate {
         try require(checks == 1)
         statusItem.update(UpdateController.State.checking)
         try require(statusItem.menu.item(withTitle: "正在检查更新…")?.isEnabled == false)
+
+        statusItem.update(UpdateController.State.upToDate)
+        guard let upToDateItem = statusItem.menu.item(withTitle: "已是最新版本，重新检查") else {
+            try require(false)
+            return
+        }
+        try require(upToDateItem.isEnabled && upToDateItem.toolTip == nil)
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: upToDateItem))
+        try require(checks == 2)
+
+        let checkError = "The release catalog could not be read"
+        statusItem.update(UpdateController.State.checkFailed(checkError))
+        guard let failedCheckItem = statusItem.menu.item(withTitle: "检查更新失败，重试") else {
+            try require(false)
+            return
+        }
+        try require(failedCheckItem.isEnabled && failedCheckItem.toolTip == checkError)
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: failedCheckItem))
+        try require(checks == 3)
+
+        let missingManifestError = "The previous update target is unavailable"
+        statusItem.update(UpdateController.State.installFailed(nil, missingManifestError))
+        guard let failedWithoutManifest = statusItem.menu.item(withTitle: "安装更新失败，重新检查") else {
+            try require(false)
+            return
+        }
+        try require(failedWithoutManifest.isEnabled && failedWithoutManifest.toolTip == missingManifestError)
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: failedWithoutManifest))
+        try require(checks == 4)
 
         let stableManifest = UpdateManifest(
             commit: String(repeating: "c", count: 40), publishedAt: Date(),
@@ -350,17 +444,36 @@ extension AppDelegate {
         let releaseURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100")!
         let manifest = try UpdateManifest.decode(data, releaseURL: releaseURL)
         statusItem.update(UpdateController.State.available(manifest))
-        let installTitle = "更新并重新启动（aaaaaaaaaaaa）…"
-        try require(statusItem.menu.item(withTitle: installTitle)?.isHidden == false)
+        let installTitle = "更新并重新启动（aaaaaaaaaaaa）"
+        guard let availableItem = statusItem.menu.item(withTitle: installTitle) else {
+            try require(false)
+            return
+        }
+        try require(!availableItem.isHidden && availableItem.isEnabled && availableItem.toolTip == nil)
         try require(statusItem.menu.item(withTitle: "检查更新")?.isEnabled == true)
-        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: installTitle))
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: availableItem))
         try require(installs == 1)
 
-        statusItem.update(UpdateController.State.available(stableManifest))
-        let versionedInstallTitle = "更新并重新启动（1.0.0）…"
-        try require(statusItem.menu.item(withTitle: versionedInstallTitle)?.isHidden == false)
-        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: versionedInstallTitle))
+        let installError = "The downloaded update could not be installed"
+        statusItem.update(UpdateController.State.installFailed(manifest, installError))
+        let retryTitle = "重试更新并重新启动（aaaaaaaaaaaa）"
+        guard let retryItem = statusItem.menu.item(withTitle: retryTitle) else {
+            try require(false)
+            return
+        }
+        try require(!retryItem.isHidden && retryItem.isEnabled && retryItem.toolTip == installError)
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: retryItem))
         try require(installs == 2)
+
+        statusItem.update(UpdateController.State.available(stableManifest))
+        let versionedInstallTitle = "更新并重新启动（1.0.0）"
+        guard let versionedItem = statusItem.menu.item(withTitle: versionedInstallTitle) else {
+            try require(false)
+            return
+        }
+        try require(!versionedItem.isHidden && versionedItem.isEnabled)
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: versionedItem))
+        try require(installs == 3)
 
         statusItem.update(UpdateController.State.downloading(manifest))
         try require(statusItem.menu.item(withTitle: "正在下载更新…")?.isEnabled == false)

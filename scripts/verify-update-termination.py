@@ -13,7 +13,7 @@ import time
 import uuid
 
 
-def verify_termination(binary, root, quit_sender=None, occluder=None):
+def verify_termination(binary, root, quit_sender=None, menu_only=False):
     contents = root / "Motionpaper.app" / "Contents"
     executable = contents / "MacOS" / "Motionpaper"
     executable.parent.mkdir(parents=True)
@@ -38,27 +38,11 @@ def verify_termination(binary, root, quit_sender=None, occluder=None):
     arguments = [str(executable), "--verify-update-termination"]
     if quit_sender:
         arguments.append("--verify-external-termination")
-    if occluder:
-        arguments.append("--verify-alert-termination")
+    if menu_only:
+        arguments.append("--verify-menu-only")
     report = root / "verification.json"
-    process = occluder_process = None
+    process = None
     try:
-        if occluder:
-            occluder_executable = occluder / "Contents" / "MacOS" / "AlertOccluder"
-            occluder_process = subprocess.Popen([str(occluder_executable), str(report), bundle_identifier], stdout=subprocess.PIPE,
-                                                stderr=subprocess.PIPE, text=True)
-            for phase in ("started", "ready"):
-                deadline = time.monotonic() + 10
-                while not report.with_suffix(f".json.occluder-{phase}").exists():
-                    if occluder_process.poll() is not None or time.monotonic() >= deadline:
-                        occluder_process.kill()
-                        stdout, stderr = occluder_process.communicate()
-                        raise RuntimeError(f"Occluder did not become {phase}: {stdout}\n{stderr}")
-                    time.sleep(0.01)
-                if phase == "started":
-                    subprocess.run(["open", "-a", str(occluder)], check=True, timeout=10)
-                    report.with_suffix(".json.occluder-activated").touch()
-            environment["MOTIONPAPER_VERIFICATION_FOREGROUND_PID"] = str(occluder_process.pid)
         process = subprocess.Popen(arguments, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if quit_sender:
             deadline = time.monotonic() + 10
@@ -68,14 +52,14 @@ def verify_termination(binary, root, quit_sender=None, occluder=None):
                     stdout, stderr = process.communicate()
                     raise RuntimeError(f"App did not become ready for external termination: {stdout}\n{stderr}")
                 time.sleep(0.01)
-            if occluder_process:
-                if json.loads(report.read_text()).get("alertVisible") is not True:
-                    raise RuntimeError("The external quit test did not show an update alert")
-                # Three bounded five-second UI transitions need completion/exit margin.
-                stdout, stderr = occluder_process.communicate(timeout=20)
-                if occluder_process.returncode != 0:
-                    raise RuntimeError(f"Alert ordering verification failed: {stdout}\n{stderr}")
-                print(stdout.strip())
+            ready = json.loads(report.read_text())
+            if menu_only:
+                if ready.get("menuOnlyVerified") is not True:
+                    raise RuntimeError(f"The menu-only update behavior was not verified: {ready}")
+                if ready.get("updateMenuTitle") != "检查更新失败，重试" or not ready.get("updateMenuToolTip"):
+                    raise RuntimeError(f"The failed update check did not expose its menu retry state: {ready}")
+                if ready.get("visibleTitledWindows") != 0:
+                    raise RuntimeError(f"Menu-only verification opened a titled window: {ready}")
             subprocess.run([str(quit_sender), str(process.pid)], check=True, timeout=10)
         try:
             stdout, stderr = process.communicate(timeout=10)
@@ -87,12 +71,17 @@ def verify_termination(binary, root, quit_sender=None, occluder=None):
         if (result.get("phase") != "terminated" or result.get("shutdownState") != "disabled"
                 or result.get("pid") != process.pid):
             raise RuntimeError(f"App did not complete shutdown: {result}")
+        if menu_only:
+            if result.get("menuOnlyVerified") is not True:
+                raise RuntimeError(f"The menu-only update behavior was not verified: {result}")
+            if (result.get("updateMenuTitle") != "检查更新失败，重试" or not result.get("updateMenuToolTip")
+                    or result.get("visibleTitledWindows") != 0):
+                raise RuntimeError(f"The menu-only failure state or window check was not preserved: {result}")
     finally:
-        for running in (process, occluder_process):
-            if running:
-                if running.poll() is None:
-                    running.kill()
-                running.communicate()
+        if process:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
 
 
 def main():
@@ -103,22 +92,12 @@ def main():
         fixture = Path(__file__).parent / "fixtures" / "QuitApplication.swift"
         subprocess.run(["xcrun", "swiftc", "-swift-version", "6", str(fixture), "-o", str(quit_sender)],
                        check=True, timeout=30)
-        occluder = root / "AlertOccluder.app"
-        occluder_contents = occluder / "Contents"
-        occluder_executable = occluder_contents / "MacOS" / "AlertOccluder"
-        occluder_executable.parent.mkdir(parents=True)
-        subprocess.run(["xcrun", "swiftc", "-swift-version", "6", "-parse-as-library",
-                        str(Path(__file__).parent / "fixtures" / "AlertOccluder.swift"), "-o", str(occluder_executable)],
-                       check=True, timeout=30)
-        with (occluder_contents / "Info.plist").open("wb") as stream:
-            plistlib.dump({"CFBundleIdentifier": f"local.motionpaper.alert-occluder.{uuid.uuid4().hex}",
-                           "CFBundleExecutable": "AlertOccluder", "CFBundlePackageType": "APPL"}, stream)
         verify_termination(binary, root / "internal")
         verify_termination(binary, root / "external", quit_sender)
-        verify_termination(binary, root / "external-alert", quit_sender, occluder=occluder)
+        verify_termination(binary, root / "external-menu-only", quit_sender, menu_only=True)
     print("Update task completed AppKit termination and shutdown cleanup.")
     print("External quit completed successfully without reporting user cancellation.")
-    print("External quit dismissed a pending update alert and completed shutdown.")
+    print("Menu-only update failure was shown without a titled window; external quit completed successfully.")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,4 @@
 import AppKit
-import AppUI
 import Darwin
 import Dispatch
 import OSLog
@@ -27,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.onInstallStableRelease = { [weak self] in self?.updates.installStableRelease() }
         statusItem.onOpenRepository = { [weak self] in self?.openRepository() }
         statusItem.onRetryPlayback = { [weak self] in self?.playback.setEnabled(true) }
+        statusItem.onMenuWillOpen = { [weak self] in self?.updates.refreshInstallationFailure() }
         updates.onStateChange = { [weak self] state in self?.statusItem.update(state) }
         updates.onStableReleaseChange = { [weak self] manifest in self?.statusItem.updateStableRelease(manifest) }
         playback.onStateChange = { [weak self] state in
@@ -62,13 +62,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func openRepository() {
         if let address = Bundle.main.object(forInfoDictionaryKey: "MotionpaperRepositoryURL") as? String,
            let url = URL(string: address), NSWorkspace.shared.open(url) {
+            statusItem.updateRepositoryError(nil)
             return
         }
-        let alert = NSAlert()
-        alert.messageText = "无法打开 GitHub 仓库"
-        alert.informativeText = "请检查默认浏览器，或使用 GitHub Release 提供的应用。"
-        alert.addButton(withTitle: "好")
-        AlertPresentation.runModal(alert)
+        statusItem.updateRepositoryError("请检查默认浏览器，或使用 GitHub Release 提供的应用。")
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -115,8 +112,7 @@ enum MotionpaperApp {
            (try? UpdateInstaller.installationInProgress(application: Bundle.main.bundleURL)) == true {
             return
         }
-        let verifyingWithoutUI = verifyingTermination && !CommandLine.arguments.contains("--verify-alert-termination")
-        application.setActivationPolicy(verifyingWithoutUI ? .prohibited : .accessory)
+        application.setActivationPolicy(verifyingTermination ? .prohibited : .accessory)
         let delegate = AppDelegate()
         application.delegate = delegate
         withExtendedLifetime(delegate) { application.run() }
