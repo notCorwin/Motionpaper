@@ -10,10 +10,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     let symbolView = StatusSymbolView()
     let menu = NSMenu()
     private let errorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let launchAtLoginItem = NSMenuItem(title: "开机自动启动", action: nil, keyEquivalent: "")
+    private let launchAtLoginItem = NSMenuItem(title: "随开机自动启动", action: nil, keyEquivalent: "")
     private let launchAtLogin = LaunchAtLoginController()
     private var isUpdatingLaunchAtLogin = false
-    private let updateItem = NSMenuItem(title: "检查更新…", action: nil, keyEquivalent: "")
+    private let updateItem = NSMenuItem(title: "检查更新", action: nil, keyEquivalent: "")
     private let installItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     var onCheckForUpdates: (@MainActor () -> Void)?
     var onInstallUpdate: (@MainActor () -> Void)?
@@ -40,16 +40,27 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         errorItem.isHidden = true
         menu.autoenablesItems = false
         menu.delegate = self
-        menu.addItem(errorItem)
-        launchAtLoginItem.target = self
-        launchAtLoginItem.action = #selector(toggleLaunchAtLogin)
-        menu.addItem(launchAtLoginItem)
+        let bundle = Bundle.main
+        let title: String
+        if bundle.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable" {
+            guard let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+                  !version.isEmpty else {
+                preconditionFailure("A stable Motionpaper build must declare its version")
+            }
+            title = "Motionpaper \(version)"
+        } else {
+            title = "Motionpaper Autobuild"
+        }
+        let versionItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        if let commit = bundle.object(forInfoDictionaryKey: "MotionpaperCommit") as? String {
+            versionItem.toolTip = "当前提交：\(commit.prefix(12))"
+        }
+        menu.addItem(versionItem)
         menu.addItem(.separator())
+        menu.addItem(errorItem)
         updateItem.target = self
         updateItem.action = #selector(checkForUpdates)
-        if let commit = Bundle.main.object(forInfoDictionaryKey: "MotionpaperCommit") as? String {
-            updateItem.toolTip = "当前提交：\(commit.prefix(12))"
-        }
         menu.addItem(updateItem)
         installItem.target = self
         installItem.action = #selector(installUpdate)
@@ -58,6 +69,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let repository = NSMenuItem(title: "打开 GitHub 仓库", action: #selector(openRepository), keyEquivalent: "")
         repository.target = self
         menu.addItem(repository)
+        menu.addItem(.separator())
+        launchAtLoginItem.target = self
+        launchAtLoginItem.action = #selector(toggleLaunchAtLogin)
+        menu.addItem(launchAtLoginItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出 Motionpaper", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
@@ -103,7 +118,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 }
             } catch {
                 let alert = NSAlert()
-                alert.messageText = "无法更改开机自动启动"
+                alert.messageText = "无法更改随开机自动启动设置"
                 alert.informativeText = error.localizedDescription
                 alert.addButton(withTitle: "好")
                 NSApp.activate()
@@ -114,7 +129,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func update(_ state: UpdateController.State) {
         updateItem.isEnabled = true
-        updateItem.title = "检查更新…"
+        updateItem.title = "检查更新"
         installItem.isHidden = true
         installItem.isEnabled = true
         switch state {

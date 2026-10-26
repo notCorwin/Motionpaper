@@ -70,9 +70,15 @@ extension AppDelegate {
             observations["windowTitles"] = titles
             let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
             statusItem.menuWillOpen(statusItem.menu)
-            guard visibleItems.filter({ !$0.isSeparatorItem }).map(\.title)
-                    == ["开机自动启动", "检查更新…", "打开 GitHub 仓库", "退出 Motionpaper"],
-                  visibleItems.filter({ $0.title != "开机自动启动" }).allSatisfy({ $0.state == .off }),
+            let versionTitle = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable"
+                ? "Motionpaper \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")"
+                : "Motionpaper Autobuild"
+            guard visibleItems.map(\.title)
+                    == [versionTitle, "", "检查更新", "打开 GitHub 仓库", "", "随开机自动启动", "", "退出 Motionpaper"],
+                  visibleItems.enumerated().filter({ $0.element.isSeparatorItem }).map(\.offset) == [1, 4, 6],
+                  visibleItems.first?.isEnabled == false,
+                  visibleItems.first?.action == nil,
+                  visibleItems.filter({ $0.title != "随开机自动启动" }).allSatisfy({ $0.state == .off }),
                   statusItem.symbolView.playbackEnabled,
                   titles.contains(StatusItemController.identifier),
                   let quit = visibleItems.last else {
@@ -126,7 +132,7 @@ extension AppDelegate {
                               userInfo: [NSLocalizedDescriptionKey: "Login item states or repository action are incorrect"])
             }
         }
-        let login = statusItem.menu.item(withTitle: "开机自动启动")
+        let login = statusItem.menu.item(withTitle: "随开机自动启动")
         try require(login?.action != nil && login?.target === statusItem)
         for (status, state) in [(SMAppService.Status.notRegistered, NSControl.StateValue.off),
                                 (.notFound, .off), (.enabled, .on), (.requiresApproval, .mixed)] {
@@ -172,7 +178,7 @@ extension AppDelegate {
                               userInfo: [NSLocalizedDescriptionKey: "Update menu states or actions are incorrect"])
             }
         }
-        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: "检查更新…"))
+        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: "检查更新"))
         try require(checks == 1)
         statusItem.update(UpdateController.State.checking)
         try require(statusItem.menu.item(withTitle: "正在检查更新…")?.isEnabled == false)
@@ -186,15 +192,15 @@ extension AppDelegate {
         statusItem.update(UpdateController.State.available(manifest))
         let installTitle = "更新并重新启动（aaaaaaaaaaaa）…"
         try require(statusItem.menu.item(withTitle: installTitle)?.isHidden == false)
-        try require(statusItem.menu.item(withTitle: "检查更新…")?.isEnabled == true)
+        try require(statusItem.menu.item(withTitle: "检查更新")?.isEnabled == true)
         statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: installTitle))
         try require(installs == 1)
         statusItem.update(UpdateController.State.downloading(manifest))
         try require(statusItem.menu.item(withTitle: "正在下载更新…")?.isEnabled == false)
-        try require(statusItem.menu.item(withTitle: "检查更新…")?.isEnabled == false)
+        try require(statusItem.menu.item(withTitle: "检查更新")?.isEnabled == false)
         statusItem.update(UpdateController.State.installing)
         try require(statusItem.menu.item(withTitle: "正在安装更新…")?.isEnabled == false)
-        try require(statusItem.menu.item(withTitle: "检查更新…")?.isEnabled == false)
+        try require(statusItem.menu.item(withTitle: "检查更新")?.isEnabled == false)
     }
 
     func verifyTermination() {
