@@ -99,7 +99,7 @@ extension AppDelegate {
                   visibleItems.first?.isEnabled == false,
                   visibleItems.first?.action == nil,
                   visibleItems.allSatisfy({ $0.state == .off }),
-                  !visibleItems.contains(where: { $0.title.hasPrefix("更新到正式版 ") }),
+                  !visibleItems.contains(where: { $0.title == "更新到正式版" }),
                   statusItem.symbolView.playbackEnabled,
                   titles.contains(StatusItemController.identifier),
                   let quit = visibleItems.last else {
@@ -220,14 +220,14 @@ extension AppDelegate {
             downloadURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/v1.0.0/Motionpaper-1.0.0-cccccccccccc.dmg")!,
             sha256: String(repeating: "d", count: 64), size: 1, version: ReleaseVersion("1.0.0")!
         )
-        let stableTitle = "更新到正式版 1.0.0"
+        let stableTitle = "更新到正式版"
         let isStableChannel = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable"
         statusItem.updateStableRelease(nil)
-        try require(!statusItem.menu.items.contains(where: { !$0.isHidden && $0.title.hasPrefix("更新到正式版 ") }))
+        try require(statusItem.menu.item(withTitle: stableTitle)?.isHidden == true)
         statusItem.update(UpdateController.State.idle)
         statusItem.updateStableRelease(stableManifest)
         if isStableChannel {
-            try require(!statusItem.menu.items.contains(where: { !$0.isHidden && $0.title.hasPrefix("更新到正式版 ") }))
+            try require(statusItem.menu.item(withTitle: stableTitle)?.isHidden == true)
         } else {
             let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
             guard let checkIndex = visibleItems.firstIndex(where: { $0.title == "检查更新" }),
@@ -252,8 +252,8 @@ extension AppDelegate {
                 sha256: stableManifest.sha256, size: stableManifest.size, version: ReleaseVersion(newerVersion)!
             )
             statusItem.updateStableRelease(newerStable)
-            try require(statusItem.menu.item(withTitle: "更新到正式版 \(newerVersion)")?.isHidden == false)
-            try require(statusItem.menu.item(withTitle: stableTitle) == nil)
+            try require(statusItem.menu.item(withTitle: stableTitle) === stableItem && !stableItem.isHidden)
+            try require(!statusItem.menu.items.contains(where: { !$0.isHidden && $0.title.hasPrefix(stableTitle + " ") }))
             statusItem.updateStableRelease(stableManifest)
         }
 

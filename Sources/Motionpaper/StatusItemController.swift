@@ -16,7 +16,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var isUpdatingLaunchAtLogin = false
     private let updateItem = NSMenuItem(title: "检查更新", action: nil, keyEquivalent: "")
     private let installItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let stableReleaseItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let stableReleaseItem = NSMenuItem(title: "更新到正式版", action: nil, keyEquivalent: "")
     private let isAutobuild = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String != "stable"
     private var isUpdating = false
     var onCheckForUpdates: (@MainActor () -> Void)?
@@ -167,11 +167,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     func updateStableRelease(_ manifest: UpdateManifest?) {
-        guard isAutobuild, let version = manifest?.version else {
+        guard isAutobuild, manifest?.version != nil else {
             stableReleaseItem.isHidden = true
             return
         }
-        stableReleaseItem.title = "更新到正式版 \(version)"
         stableReleaseItem.isHidden = false
         stableReleaseItem.isEnabled = !isUpdating
     }
