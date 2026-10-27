@@ -403,35 +403,36 @@ extension AppDelegate {
                               userInfo: [NSLocalizedDescriptionKey: "Update menu states or actions are incorrect"])
             }
         }
-        statusItem.menu.performActionForItem(at: statusItem.menu.indexOfItem(withTitle: "检查更新"))
+        func requireUpdateItem(_ title: String, enabled: Bool = true, toolTip: String? = nil) throws -> NSMenuItem {
+            let items = statusItem.menu.items.filter {
+                !$0.isHidden && $0.title != "更新到正式版"
+                    && ($0.title.contains("更新") || $0.title == "已是最新版本")
+            }
+            guard items.count == 1, let item = items.first,
+                  item.title == title, item.isEnabled == enabled, item.toolTip == toolTip else {
+                throw NSError(domain: "MotionpaperVerification", code: 3,
+                              userInfo: [NSLocalizedDescriptionKey: "Expected a single update menu item: \(title)"])
+            }
+            return item
+        }
+        let checkItem = try requireUpdateItem("检查更新")
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: checkItem))
         try require(checks == 1)
         statusItem.update(UpdateController.State.checking)
-        try require(statusItem.menu.item(withTitle: "正在检查更新…")?.isEnabled == false)
+        _ = try requireUpdateItem("正在检查更新…", enabled: false)
 
         statusItem.update(UpdateController.State.upToDate)
-        guard let upToDateItem = statusItem.menu.item(withTitle: "已是最新版本") else {
-            try require(false)
-            return
-        }
-        try require(!upToDateItem.isEnabled && upToDateItem.toolTip == nil)
+        _ = try requireUpdateItem("已是最新版本", enabled: false)
 
         let checkError = "The release catalog could not be read"
         statusItem.update(UpdateController.State.checkFailed(checkError))
-        guard let failedCheckItem = statusItem.menu.item(withTitle: "检查更新失败，重试") else {
-            try require(false)
-            return
-        }
-        try require(failedCheckItem.isEnabled && failedCheckItem.toolTip == checkError)
+        let failedCheckItem = try requireUpdateItem("检查更新失败，重试", toolTip: checkError)
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: failedCheckItem))
         try require(checks == 2)
 
         let missingManifestError = "The previous update target is unavailable"
         statusItem.update(UpdateController.State.installFailed(nil, missingManifestError))
-        guard let failedWithoutManifest = statusItem.menu.item(withTitle: "安装更新失败，重新检查") else {
-            try require(false)
-            return
-        }
-        try require(failedWithoutManifest.isEnabled && failedWithoutManifest.toolTip == missingManifestError)
+        let failedWithoutManifest = try requireUpdateItem("安装更新失败，重新检查", toolTip: missingManifestError)
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: failedWithoutManifest))
         try require(checks == 3)
 
@@ -495,39 +496,25 @@ extension AppDelegate {
         let manifest = try UpdateManifest.decode(data, releaseURL: releaseURL)
         statusItem.update(UpdateController.State.available(manifest))
         let installTitle = "更新并重新启动（aaaaaaaaaaaa）"
-        guard let availableItem = statusItem.menu.item(withTitle: installTitle) else {
-            try require(false)
-            return
-        }
-        try require(!availableItem.isHidden && availableItem.isEnabled && availableItem.toolTip == nil)
-        try require(statusItem.menu.item(withTitle: "检查更新")?.isEnabled == true)
+        let availableItem = try requireUpdateItem(installTitle)
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: availableItem))
-        try require(installs == 1)
+        try require(installs == 1 && checks == 3)
 
         let installError = "The downloaded update could not be installed"
         statusItem.update(UpdateController.State.installFailed(manifest, installError))
         let retryTitle = "重试更新并重新启动（aaaaaaaaaaaa）"
-        guard let retryItem = statusItem.menu.item(withTitle: retryTitle) else {
-            try require(false)
-            return
-        }
-        try require(!retryItem.isHidden && retryItem.isEnabled && retryItem.toolTip == installError)
+        let retryItem = try requireUpdateItem(retryTitle, toolTip: installError)
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: retryItem))
-        try require(installs == 2)
+        try require(installs == 2 && checks == 3)
 
         statusItem.update(UpdateController.State.available(stableManifest))
         let versionedInstallTitle = "更新并重新启动（1.0.0）"
-        guard let versionedItem = statusItem.menu.item(withTitle: versionedInstallTitle) else {
-            try require(false)
-            return
-        }
-        try require(!versionedItem.isHidden && versionedItem.isEnabled)
+        let versionedItem = try requireUpdateItem(versionedInstallTitle)
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: versionedItem))
-        try require(installs == 3)
+        try require(installs == 3 && checks == 3)
 
         statusItem.update(UpdateController.State.downloading(manifest))
-        try require(statusItem.menu.item(withTitle: "正在下载更新…")?.isEnabled == false)
-        try require(statusItem.menu.item(withTitle: "检查更新")?.isEnabled == false)
+        _ = try requireUpdateItem("正在下载更新…", enabled: false)
         if !isStableChannel {
             try require(statusItem.menu.item(withTitle: stableTitle)?.isEnabled == false)
         }
@@ -536,10 +523,27 @@ extension AppDelegate {
             try require(statusItem.menu.item(withTitle: stableTitle)?.isEnabled == true)
         }
         statusItem.update(UpdateController.State.installing)
-        try require(statusItem.menu.item(withTitle: "正在安装更新…")?.isEnabled == false)
-        try require(statusItem.menu.item(withTitle: "检查更新")?.isEnabled == false)
+        _ = try requireUpdateItem("正在安装更新…", enabled: false)
         if !isStableChannel {
             try require(statusItem.menu.item(withTitle: stableTitle)?.isEnabled == false)
+        }
+
+        let checkStates: [(UpdateController.State, String, Bool, String?)] = [
+            (.idle, "检查更新", true, nil),
+            (.checking, "正在检查更新…", false, nil),
+            (.upToDate, "已是最新版本", false, nil),
+            (.checkFailed(checkError), "检查更新失败，重试", true, checkError),
+            (.installFailed(nil, missingManifestError), "安装更新失败，重新检查", true, missingManifestError),
+        ]
+        for (state, title, enabled, toolTip) in checkStates {
+            statusItem.update(UpdateController.State.installFailed(manifest, installError))
+            statusItem.update(state)
+            let item = try requireUpdateItem(title, enabled: enabled, toolTip: toolTip)
+            if enabled {
+                let previousChecks = checks
+                statusItem.menu.performActionForItem(at: statusItem.menu.index(of: item))
+                try require(checks == previousChecks + 1 && installs == 3)
+            }
         }
     }
 

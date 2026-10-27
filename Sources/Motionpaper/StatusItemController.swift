@@ -17,7 +17,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var isUpdatingLaunchAtLogin = false
     private var loginChangeFailure: String?
     private let updateItem = NSMenuItem(title: "检查更新", action: nil, keyEquivalent: "")
-    private let installItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let stableReleaseItem = NSMenuItem(title: "更新到正式版", action: nil, keyEquivalent: "")
     private let repositoryItem = NSMenuItem(title: "打开 GitHub 仓库", action: nil, keyEquivalent: "")
     private let isAutobuild = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String != "stable"
@@ -74,10 +73,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         updateItem.target = self
         updateItem.action = #selector(checkForUpdates)
         menu.addItem(updateItem)
-        installItem.target = self
-        installItem.action = #selector(installUpdate)
-        installItem.isHidden = true
-        menu.addItem(installItem)
         stableReleaseItem.target = self
         stableReleaseItem.action = #selector(installStableRelease)
         stableReleaseItem.isHidden = true
@@ -159,9 +154,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         updateItem.isEnabled = true
         updateItem.title = "检查更新"
         updateItem.toolTip = nil
-        installItem.isHidden = true
-        installItem.isEnabled = true
-        installItem.toolTip = nil
+        updateItem.action = #selector(checkForUpdates)
         switch state {
         case .idle:
             break
@@ -172,29 +165,24 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             updateItem.title = "已是最新版本"
             updateItem.isEnabled = false
         case .available(let manifest):
-            installItem.isHidden = false
-            installItem.title = "更新并重新启动（\(manifest.version?.description ?? manifest.shortCommit)）"
+            updateItem.title = "更新并重新启动（\(manifest.version?.description ?? manifest.shortCommit)）"
+            updateItem.action = #selector(installUpdate)
         case .downloading:
+            updateItem.title = "正在下载更新…"
             updateItem.isEnabled = false
-            installItem.isHidden = false
-            installItem.title = "正在下载更新…"
-            installItem.isEnabled = false
         case .installing:
+            updateItem.title = "正在安装更新…"
             updateItem.isEnabled = false
-            installItem.isHidden = false
-            installItem.title = "正在安装更新…"
-            installItem.isEnabled = false
         case .checkFailed(let message):
             updateItem.title = "检查更新失败，重试"
             updateItem.toolTip = message
         case .installFailed(let manifest, let message):
+            updateItem.toolTip = message
             if let manifest {
-                installItem.isHidden = false
-                installItem.title = "重试更新并重新启动（\(manifest.version?.description ?? manifest.shortCommit)）"
-                installItem.toolTip = message
+                updateItem.title = "重试更新并重新启动（\(manifest.version?.description ?? manifest.shortCommit)）"
+                updateItem.action = #selector(installUpdate)
             } else {
                 updateItem.title = "安装更新失败，重新检查"
-                updateItem.toolTip = message
             }
         }
     }
