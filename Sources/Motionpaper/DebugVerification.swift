@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import PlaybackCore
 import ServiceManagement
 import UpdateCore
 
@@ -147,6 +148,9 @@ extension AppDelegate {
             observations["iconEnabled"] = statusItem.symbolView.playbackEnabled
             observations["iconOpacity"] = statusItem.symbolView.alphaValue
             observations["ribbonOpacity"] = statusItem.symbolView.currentRibbonOpacity
+            observations["warningEnabled"] = statusItem.symbolView.warningEnabled
+            observations["warningAnimationEnabled"] = statusItem.symbolView.warningAnimationEnabled
+            observations["warningOpacity"] = statusItem.symbolView.currentWarningOpacity
             observations["timestamp"] = Date().timeIntervalSince1970
             observations["menuBarWindowTitle"] = statusItem.symbolView.window?.title
             let data = try JSONSerialization.data(withJSONObject: observations, options: [.prettyPrinted, .sortedKeys])
@@ -201,6 +205,8 @@ extension AppDelegate {
                   visibleItems.allSatisfy({ $0.state == .off }),
                   !visibleItems.contains(where: { $0.title == "更新到正式版" }),
                   statusItem.symbolView.playbackEnabled,
+                  !statusItem.symbolView.warningEnabled,
+                  !statusItem.symbolView.warningAnimationEnabled,
                   titles.contains(StatusItemController.identifier),
                   let quit = visibleItems.last else {
                 throw NSError(domain: "MotionpaperVerification", code: 2, userInfo: [NSLocalizedDescriptionKey: "Expected automatic playback, login/repository/update/quit actions, and stable CGWindow identity"])
@@ -231,6 +237,26 @@ extension AppDelegate {
                 try snapshot("enabled-" + name)
             }
             statusItem.symbolView.appearance = nil
+            statusItem.update(.failed("警告图标效果验证"))
+            var warningSamples: [[String: Any]] = []
+            for _ in 0..<12 {
+                try await Task.sleep(for: .milliseconds(200))
+                warningSamples.append(["ribbon": statusItem.symbolView.currentRibbonOpacity,
+                                       "warning": statusItem.symbolView.currentWarningOpacity])
+            }
+            observations["warningSamples"] = warningSamples
+            let showsRibbon = warningSamples.contains {
+                ($0["ribbon"] as? Float ?? 0) > 0.9 && ($0["warning"] as? Float ?? 1) < 0.1
+            }
+            let showsWarning = warningSamples.contains {
+                ($0["warning"] as? Float ?? 0) > 0.9 && ($0["ribbon"] as? Float ?? 1) < 0.1
+            }
+            guard showsWarning,
+                  NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || showsRibbon else {
+                throw NSError(domain: "MotionpaperVerification", code: 16,
+                              userInfo: [NSLocalizedDescriptionKey: "The warning indicator did not display the expected symbols"])
+            }
+            statusItem.update(playback.state)
             try record("readyToQuit")
             // Exercise the real menu action and applicationWillTerminate cleanup.
             statusItem.menu.performActionForItem(at: statusItem.menu.index(of: quit))
@@ -257,6 +283,15 @@ extension AppDelegate {
             guard valid else {
                 throw NSError(domain: "MotionpaperVerification", code: 5,
                               userInfo: [NSLocalizedDescriptionKey: "Login item states or repository action are incorrect"])
+            }
+        }
+        func requirePlaybackIndicator(playback: Bool, warning: Bool) throws {
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            guard statusItem.symbolView.playbackEnabled == playback,
+                  statusItem.symbolView.warningEnabled == warning,
+                  statusItem.symbolView.warningAnimationEnabled == (warning && !reduceMotion) else {
+                throw NSError(domain: "MotionpaperVerification", code: 15,
+                              userInfo: [NSLocalizedDescriptionKey: "Playback warning indicator is incorrect"])
             }
         }
         var menuOpenings = 0
@@ -321,8 +356,16 @@ extension AppDelegate {
         }
         try require(!retryItem.isHidden && retryItem.isEnabled && retryItem.action != nil
                     && retryItem.target === statusItem && retryItem.toolTip == diagnostic)
+        try requirePlaybackIndicator(playback: false, warning: true)
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: retryItem))
         try require(retries == 1)
+        for state in [PlaybackController.State.starting, .enabled, .disabled] {
+            statusItem.update(state)
+            try requirePlaybackIndicator(playback: state == .enabled, warning: false)
+            try require(retryItem.isHidden && !retryItem.isEnabled)
+            statusItem.update(.failed(diagnostic))
+            try requirePlaybackIndicator(playback: false, warning: true)
+        }
 
         guard let address = Bundle.main.object(forInfoDictionaryKey: "MotionpaperRepositoryURL") as? String,
               let url = URL(string: address) else {

@@ -35,6 +35,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.logger.info("Playback state: \(String(describing: state), privacy: .public)")
             if state == .enabled { self.confirmUpdateLaunch() }
         }
+        #if DEBUG
+        if CommandLine.arguments.contains("--preview-warning") {
+            statusItem.update(.failed("警告图标效果预览"))
+            return
+        }
+        #endif
         playback.setEnabled(true)
         #if DEBUG
         if CommandLine.arguments.contains("--verify-update-launch") {

@@ -209,8 +209,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     func update(_ state: PlaybackController.State) {
-        let enabled = state == .enabled
-        symbolView.setPlaybackEnabled(enabled)
+        symbolView.update(state)
         errorItem.isHidden = true
         errorItem.isEnabled = false
         errorItem.toolTip = nil
@@ -235,11 +234,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
 @MainActor
 final class StatusSymbolView: NSView {
-    private(set) var playbackEnabled = false
+    private enum Mode {
+        case inactive, playing, warning
+    }
+
+    private var mode: Mode?
     private let imageView = NSImageView()
-    private var hasRendered = false
-    private static let inactiveOpacity: CGFloat = 0.35
+    private let warningImageView = NSImageView()
+    private static let inactiveOpacity: Float = 0.35
     private static let animationKey = "motionpaper.flow"
+    private static let warningAnimationKey = "motionpaper.warning"
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -249,12 +253,22 @@ final class StatusSymbolView: NSView {
         }
         image.isTemplate = true
         imageView.image = image
-        imageView.imageScaling = .scaleProportionallyDown
-        imageView.contentTintColor = .labelColor
-        imageView.wantsLayer = true
-        imageView.setAccessibilityElement(false)
-        addSubview(imageView)
-        setPlaybackEnabled(false)
+        guard let warning = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil) else {
+            preconditionFailure("The Motionpaper warning symbol is unavailable")
+        }
+        warning.isTemplate = true
+        warningImageView.image = warning
+        for view in [imageView, warningImageView] {
+            view.imageScaling = .scaleProportionallyDown
+            view.contentTintColor = .labelColor
+            view.wantsLayer = true
+            view.setAccessibilityElement(false)
+            addSubview(view)
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(accessibilityDisplayOptionsChanged(_:)),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        update(.disabled)
     }
 
     convenience init() { self.init(frame: .zero) }
@@ -266,30 +280,79 @@ final class StatusSymbolView: NSView {
     override func layout() {
         super.layout()
         imageView.frame = bounds
+        warningImageView.frame = bounds
     }
 
-    func setPlaybackEnabled(_ enabled: Bool) {
-        guard !hasRendered || enabled != playbackEnabled else { return }
-        hasRendered = true
-        playbackEnabled = enabled
+    func update(_ state: PlaybackController.State) {
+        let next: Mode = switch state {
+        case .disabled, .starting: .inactive
+        case .enabled: .playing
+        case .failed: .warning
+        }
+        guard next != mode else { return }
+        mode = next
+        render()
+    }
+
+    @objc private nonisolated func accessibilityDisplayOptionsChanged(_ notification: Notification) {
+        Task { @MainActor [weak self] in self?.render() }
+    }
+
+    private func render() {
+        guard let mode else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
         imageView.layer?.removeAnimation(forKey: Self.animationKey)
-        imageView.alphaValue = enabled ? 1 : Self.inactiveOpacity
-        guard enabled, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
-        let animation = CAKeyframeAnimation(keyPath: "opacity")
-        animation.keyTimes = [0, 0.5, 1]
-        animation.values = [0.55, 1, 0.55]
-        animation.duration = 1.8
-        animation.repeatCount = .infinity
-        animation.calculationMode = .cubic
-        imageView.layer?.add(animation, forKey: Self.animationKey)
+        imageView.layer?.removeAnimation(forKey: Self.warningAnimationKey)
+        warningImageView.layer?.removeAnimation(forKey: Self.warningAnimationKey)
+        imageView.layer?.opacity = switch mode {
+        case .inactive: Self.inactiveOpacity
+        case .playing: 1
+        case .warning: 0
+        }
+        warningImageView.layer?.opacity = mode == .warning ? 1 : 0
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        switch mode {
+        case .inactive:
+            break
+        case .playing:
+            let animation = CAKeyframeAnimation(keyPath: "opacity")
+            animation.keyTimes = [0, 0.5, 1]
+            animation.values = [0.55, 1, 0.55]
+            animation.duration = 1.8
+            animation.repeatCount = .infinity
+            animation.calculationMode = .cubic
+            imageView.layer?.add(animation, forKey: Self.animationKey)
+        case .warning:
+            let start = CACurrentMediaTime()
+            for (view, values) in [(imageView, [0, 1, 0]), (warningImageView, [1, 0, 1])] {
+                let animation = CAKeyframeAnimation(keyPath: "opacity")
+                animation.keyTimes = [0, 0.5, 1]
+                animation.values = values
+                animation.duration = 2
+                animation.beginTime = start
+                animation.repeatCount = .infinity
+                animation.calculationMode = .discrete
+                view.layer?.add(animation, forKey: Self.warningAnimationKey)
+            }
+        }
     }
 
     #if DEBUG
+    var playbackEnabled: Bool { mode == .playing }
+    var warningEnabled: Bool { mode == .warning }
+    var warningAnimationEnabled: Bool {
+        imageView.layer?.animation(forKey: Self.warningAnimationKey) != nil
+            && warningImageView.layer?.animation(forKey: Self.warningAnimationKey) != nil
+    }
+
     var currentRibbonOpacity: Float {
         imageView.layer?.presentation()?.opacity ?? imageView.layer?.opacity ?? 0
+    }
+
+    var currentWarningOpacity: Float {
+        warningImageView.layer?.presentation()?.opacity ?? warningImageView.layer?.opacity ?? 0
     }
     #endif
 }
