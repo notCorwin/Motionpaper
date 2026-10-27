@@ -169,7 +169,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             updateItem.title = "正在检查更新…"
             updateItem.isEnabled = false
         case .upToDate:
-            updateItem.title = "已是最新版本，重新检查"
+            updateItem.title = "已是最新版本"
+            updateItem.isEnabled = false
         case .available(let manifest):
             installItem.isHidden = false
             installItem.title = "更新并重新启动（\(manifest.version?.description ?? manifest.shortCommit)）"

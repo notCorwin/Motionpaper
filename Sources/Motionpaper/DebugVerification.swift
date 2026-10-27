@@ -366,13 +366,11 @@ extension AppDelegate {
         try require(statusItem.menu.item(withTitle: "正在检查更新…")?.isEnabled == false)
 
         statusItem.update(UpdateController.State.upToDate)
-        guard let upToDateItem = statusItem.menu.item(withTitle: "已是最新版本，重新检查") else {
+        guard let upToDateItem = statusItem.menu.item(withTitle: "已是最新版本") else {
             try require(false)
             return
         }
-        try require(upToDateItem.isEnabled && upToDateItem.toolTip == nil)
-        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: upToDateItem))
-        try require(checks == 2)
+        try require(!upToDateItem.isEnabled && upToDateItem.toolTip == nil)
 
         let checkError = "The release catalog could not be read"
         statusItem.update(UpdateController.State.checkFailed(checkError))
@@ -382,7 +380,7 @@ extension AppDelegate {
         }
         try require(failedCheckItem.isEnabled && failedCheckItem.toolTip == checkError)
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: failedCheckItem))
-        try require(checks == 3)
+        try require(checks == 2)
 
         let missingManifestError = "The previous update target is unavailable"
         statusItem.update(UpdateController.State.installFailed(nil, missingManifestError))
@@ -392,7 +390,7 @@ extension AppDelegate {
         }
         try require(failedWithoutManifest.isEnabled && failedWithoutManifest.toolTip == missingManifestError)
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: failedWithoutManifest))
-        try require(checks == 4)
+        try require(checks == 3)
 
         let stableManifest = UpdateManifest(
             commit: String(repeating: "c", count: 40), publishedAt: Date(),
