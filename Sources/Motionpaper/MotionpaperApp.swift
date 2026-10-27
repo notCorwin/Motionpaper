@@ -8,7 +8,14 @@ import WallpaperCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    let playback = PlaybackController { try await NativeWallpaperSession.acquire() }
+    let playback: PlaybackController = {
+        #if DEBUG
+        if CommandLine.arguments.contains("--preview-warning") {
+            return PlaybackController { throw WarningPreviewError() }
+        }
+        #endif
+        return PlaybackController { try await NativeWallpaperSession.acquire() }
+    }()
     let statusItem = StatusItemController()
     let updates = UpdateController()
     private let logger = Logger(subsystem: "local.motionpaper.app", category: "playback")
@@ -25,7 +32,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.onInstallUpdate = { [weak self] in self?.updates.installAvailableUpdate() }
         statusItem.onInstallStableRelease = { [weak self] in self?.updates.installStableRelease() }
         statusItem.onOpenRepository = { [weak self] in self?.openRepository() }
-        statusItem.onRetryPlayback = { [weak self] in self?.playback.setEnabled(true) }
         statusItem.onMenuWillOpen = { [weak self] in self?.updates.menuWillOpen() }
         updates.onStateChange = { [weak self] state in self?.statusItem.update(state) }
         updates.onStableReleaseChange = { [weak self] manifest in self?.statusItem.updateStableRelease(manifest) }
@@ -35,14 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.logger.info("Playback state: \(String(describing: state), privacy: .public)")
             if state == .enabled { self.confirmUpdateLaunch() }
         }
-        #if DEBUG
-        if CommandLine.arguments.contains("--preview-warning") {
-            statusItem.update(.failed("警告图标效果预览"))
-            return
-        }
-        #endif
         playback.setEnabled(true)
         #if DEBUG
+        if CommandLine.arguments.contains("--preview-warning") { return }
         if CommandLine.arguments.contains("--verify-update-launch") {
             Task { await verifyUpdateLaunch() }
             return
@@ -94,6 +95,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 }
+
+#if DEBUG
+private struct WarningPreviewError: Error, CustomStringConvertible {
+    let description = "警告图标效果预览：模拟播放失败"
+}
+#endif
 
 @main
 enum MotionpaperApp {
@@ -178,7 +185,8 @@ enum MotionpaperApp {
         for _ in 0..<2 {
             controller.setEnabled(true)
             let deadline = ContinuousClock.now + .seconds(10)
-            while controller.state == .starting, ContinuousClock.now < deadline {
+            while controller.state != .enabled, ContinuousClock.now < deadline {
+                if case .failed = controller.state { break }
                 try await Task.sleep(for: .milliseconds(20))
             }
             guard controller.state == .enabled, observedSession != nil else {

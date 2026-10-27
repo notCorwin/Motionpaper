@@ -4,12 +4,16 @@ public protocol PlaybackSession: AnyObject {
     func release()
 }
 
+/// An acquisition failure that cannot be resolved by retrying.
+public protocol NonRetryablePlaybackError: Error {}
+
 @MainActor
 public final class PlaybackController {
     public enum State: Equatable {
         case disabled
         case starting
         case enabled
+        case retrying(String, after: Duration)
         case failed(String)
     }
 
@@ -20,64 +24,123 @@ public final class PlaybackController {
 
     private let acquire: @MainActor () async throws -> any PlaybackSession
     private let acquisitionTimeout: Duration
+    private let retryDelays: [Duration]
+    private var isEnabled = false
     private var session: (any PlaybackSession)?
     private var request: Task<Void, Never>?
     private var timeout: Task<Void, Never>?
+    private var retry: Task<Void, Never>?
+    private var nextRetryIndex = 0
     private var generation: UInt64 = 0
 
     public init(acquisitionTimeout: Duration = .seconds(10),
+                retryDelays: [Duration] = [.seconds(1), .seconds(2), .seconds(4),
+                                           .seconds(8), .seconds(16), .seconds(30)],
                 acquire: @escaping @MainActor () async throws -> any PlaybackSession) {
+        precondition(acquisitionTimeout > .zero, "acquisitionTimeout must be positive")
+        precondition(!retryDelays.isEmpty && retryDelays.allSatisfy { $0 > .zero },
+                     "retryDelays must contain positive delays")
         self.acquisitionTimeout = acquisitionTimeout
+        self.retryDelays = retryDelays
         self.acquire = acquire
     }
 
     public func setEnabled(_ enabled: Bool) {
-        if enabled && (state == .enabled || state == .starting) { return }
-        generation &+= 1
-        let currentGeneration = generation
-        request?.cancel()
-        request = nil
-        timeout?.cancel()
-        timeout = nil
-        session?.release()
-        session = nil
-        guard enabled else {
-            state = .disabled
+        guard isEnabled != enabled else { return }
+        isEnabled = enabled
+        nextRetryIndex = 0
+        if enabled {
+            startAcquisition()
             return
         }
 
-        state = .starting
+        generation &+= 1
+        let currentGeneration = generation
+        let previousRequest = request
+        let previousTimeout = timeout
+        let previousRetry = retry
+        let previousSession = session
+        request = nil
+        timeout = nil
+        retry = nil
+        session = nil
+        previousRequest?.cancel()
+        previousTimeout?.cancel()
+        previousRetry?.cancel()
+        previousSession?.release()
+        guard generation == currentGeneration, !isEnabled else { return }
+        state = .disabled
+    }
+
+    private func startAcquisition() {
+        generation &+= 1
+        let currentGeneration = generation
         request = Task { @MainActor [weak self, acquire] in
+            guard !Task.isCancelled, self?.generation == currentGeneration,
+                  self?.isEnabled == true else { return }
             do {
                 let acquired = try await acquire()
-                guard let self, self.generation == currentGeneration, !Task.isCancelled else {
+                guard let self, self.generation == currentGeneration,
+                      self.isEnabled, !Task.isCancelled else {
                     acquired.release()
                     return
                 }
                 self.session = acquired
                 self.request = nil
-                self.timeout?.cancel()
+                let previousTimeout = self.timeout
                 self.timeout = nil
+                self.nextRetryIndex = 0
+                previousTimeout?.cancel()
+                guard self.generation == currentGeneration, self.isEnabled else { return }
                 self.state = .enabled
             } catch {
-                guard let self, self.generation == currentGeneration, !Task.isCancelled else { return }
+                guard let self, self.generation == currentGeneration,
+                      self.isEnabled, !Task.isCancelled else { return }
                 self.request = nil
-                self.timeout?.cancel()
+                let previousTimeout = self.timeout
                 self.timeout = nil
-                self.state = .failed(String(describing: error))
+                previousTimeout?.cancel()
+                guard self.generation == currentGeneration, self.isEnabled else { return }
+                let message = String(describing: error)
+                if error is any NonRetryablePlaybackError {
+                    self.state = .failed(message)
+                } else {
+                    self.scheduleRetry(message)
+                }
             }
         }
-        // The native request may ignore cancellation or never resume. Keep its
-        // deadline independent so the controller can still expose a retry.
+        // Native acquisition can ignore cancellation or never resume, so its
+        // deadline must not wait for the request task to finish.
         timeout = Task { @MainActor [weak self, acquisitionTimeout] in
             do { try await Task.sleep(for: acquisitionTimeout) }
             catch { return }
-            guard let self, self.generation == currentGeneration, self.state == .starting else { return }
+            guard let self, self.generation == currentGeneration,
+                  self.isEnabled, !Task.isCancelled else { return }
             self.generation &+= 1
-            self.request?.cancel()
+            let timeoutGeneration = self.generation
+            let previousRequest = self.request
             self.request = nil
             self.timeout = nil
-            self.state = .failed("开始播放超时，请重试。")
+            previousRequest?.cancel()
+            guard self.generation == timeoutGeneration, self.isEnabled else { return }
+            self.scheduleRetry("开始播放超时。")
         }
+        state = .starting
+    }
+
+    private func scheduleRetry(_ message: String) {
+        generation &+= 1
+        let currentGeneration = generation
+        let delay = retryDelays[nextRetryIndex]
+        if nextRetryIndex < retryDelays.count - 1 { nextRetryIndex += 1 }
+        retry = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: delay) }
+            catch { return }
+            guard let self, self.generation == currentGeneration,
+                  self.isEnabled, !Task.isCancelled else { return }
+            self.retry = nil
+            self.startAcquisition()
+        }
+        state = .retrying(message, after: delay)
     }
 }

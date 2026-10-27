@@ -102,24 +102,27 @@ extension AppDelegate {
                 try await Task.sleep(for: .milliseconds(20))
             }
             if CommandLine.arguments.contains("--verify-playback-retry") {
-                guard case .failed = playback.state,
-                      let retry = statusItem.menu.item(withTitle: "重试播放"),
-                      retry.isEnabled, !retry.isHidden else {
+                guard case let .retrying(message, after: delay) = playback.state,
+                      delay == .seconds(1), !message.isEmpty,
+                      statusItem.symbolView.warningEnabled,
+                      statusItem.symbolView.toolTip == "Motionpaper\n等待自动重试（间隔 1 秒）\n\(message)",
+                      !statusItem.menu.items.contains(where: { $0.title == "重试播放" }) else {
                     throw NSError(domain: "MotionpaperVerification", code: 6,
-                                  userInfo: [NSLocalizedDescriptionKey: "Playback failure did not offer retry"])
-                }
-                statusItem.menu.performActionForItem(at: statusItem.menu.index(of: retry))
-                guard playback.state == .starting, retry.isHidden, !retry.isEnabled else {
-                    throw NSError(domain: "MotionpaperVerification", code: 7,
-                                  userInfo: [NSLocalizedDescriptionKey: "Retry did not restart native playback acquisition"])
+                                  userInfo: [NSLocalizedDescriptionKey: "Playback failure did not schedule the first automatic retry"])
                 }
                 deadline = ContinuousClock.now + .seconds(10)
-                while playback.state == .starting, ContinuousClock.now < deadline {
+                while playback.state != .enabled, ContinuousClock.now < deadline {
+                    if case .failed = playback.state { break }
+                    if playback.state == .disabled { break }
                     try await Task.sleep(for: .milliseconds(20))
                 }
-                guard playback.state == .enabled, retry.isHidden, !retry.isEnabled else {
+                guard playback.state == .enabled,
+                      statusItem.symbolView.playbackEnabled,
+                      !statusItem.symbolView.warningEnabled,
+                      !statusItem.symbolView.warningAnimationEnabled,
+                      statusItem.symbolView.toolTip == "Motionpaper\n正在播放动态墙纸" else {
                     throw NSError(domain: "MotionpaperVerification", code: 8,
-                                  userInfo: [NSLocalizedDescriptionKey: "Playback did not recover after retry"])
+                                  userInfo: [NSLocalizedDescriptionKey: "Playback did not recover automatically after retry"])
                 }
             }
             try FileManager.default.createDirectory(at: verificationOutput, withIntermediateDirectories: true)
@@ -194,16 +197,19 @@ extension AppDelegate {
             case .requiresApproval: loginTitle = "随开机自动启动：等待允许"
             default: loginTitle = "随开机自动启动：否"
             }
-            var expectedMenuItems = [versionTitle, "", "检查更新", "打开 GitHub 仓库", "", loginTitle]
+            var expectedMenuItems = [versionTitle, "正在播放动态墙纸", "", "检查更新", "打开 GitHub 仓库", "", loginTitle]
             if loginStatus == .requiresApproval { expectedMenuItems.append("在系统设置中允许开机启动") }
             expectedMenuItems.append(contentsOf: ["", "退出 Motionpaper"])
-            let separatorOffsets = loginStatus == .requiresApproval ? [1, 4, 7] : [1, 4, 6]
+            let separatorOffsets = loginStatus == .requiresApproval ? [2, 5, 8] : [2, 5, 7]
             guard visibleItems.map(\.title) == expectedMenuItems,
                   visibleItems.enumerated().filter({ $0.element.isSeparatorItem }).map(\.offset) == separatorOffsets,
                   visibleItems.first?.isEnabled == false,
                   visibleItems.first?.action == nil,
+                  !visibleItems[1].isEnabled,
+                  visibleItems[1].action == nil,
                   visibleItems.allSatisfy({ $0.state == .off }),
                   !visibleItems.contains(where: { $0.title == "更新到正式版" }),
+                  !statusItem.menu.items.contains(where: { $0.title == "重试播放" }),
                   statusItem.symbolView.playbackEnabled,
                   !statusItem.symbolView.warningEnabled,
                   !statusItem.symbolView.warningAnimationEnabled,
@@ -269,11 +275,9 @@ extension AppDelegate {
 
     private func verifyApplicationMenu() throws {
         let originalOpen = statusItem.onOpenRepository
-        let originalRetry = statusItem.onRetryPlayback
         let originalMenuWillOpen = statusItem.onMenuWillOpen
         defer {
             statusItem.onOpenRepository = originalOpen
-            statusItem.onRetryPlayback = originalRetry
             statusItem.onMenuWillOpen = originalMenuWillOpen
             statusItem.updateRepositoryError(nil)
             statusItem.update(playback.state)
@@ -346,26 +350,68 @@ extension AppDelegate {
         statusItem.updateRepositoryError(nil)
         try require(retryRepository.title == "打开 GitHub 仓库" && retryRepository.toolTip == nil)
 
-        var retries = 0
-        statusItem.onRetryPlayback = { retries += 1 }
         let diagnostic = "Native playback acquisition failed"
-        statusItem.update(.failed(diagnostic))
-        guard let retryItem = statusItem.menu.item(withTitle: "重试播放") else {
-            try require(false)
-            return
-        }
-        try require(!retryItem.isHidden && retryItem.isEnabled && retryItem.action != nil
-                    && retryItem.target === statusItem && retryItem.toolTip == diagnostic)
-        try requirePlaybackIndicator(playback: false, warning: true)
-        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: retryItem))
-        try require(retries == 1)
-        for state in [PlaybackController.State.starting, .enabled, .disabled] {
+        let fatalDiagnostic = "Native wallpaper playback is unsupported"
+        let exactDiagnostic = String(repeating: "错", count: 40)
+        let longDiagnostic = String(repeating: "墙", count: 40) + "错"
+        let longErrorTitle = String(repeating: "墙", count: 40) + "…"
+        func requirePlaybackState(_ state: PlaybackController.State, title: String,
+                                  failure: String? = nil, errorTitle: String = "",
+                                  playback: Bool = false, warning: Bool = false) throws {
             statusItem.update(state)
-            try requirePlaybackIndicator(playback: state == .enabled, warning: false)
-            try require(retryItem.isHidden && !retryItem.isEnabled)
-            statusItem.update(.failed(diagnostic))
-            try requirePlaybackIndicator(playback: false, warning: true)
+            guard statusItem.menu.items.count >= 3 else {
+                throw NSError(domain: "MotionpaperVerification", code: 17,
+                              userInfo: [NSLocalizedDescriptionKey: "Playback menu rows are missing"])
+            }
+            let statusRow = statusItem.menu.items[1]
+            let errorRow = statusItem.menu.items[2]
+            let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
+            let separatorOffset = failure == nil ? 2 : 3
+            let toolTip = (["Motionpaper", title] + (failure.map { [$0] } ?? [])).joined(separator: "\n")
+            guard visibleItems.count > separatorOffset, visibleItems[1] === statusRow,
+                  visibleItems[separatorOffset].isSeparatorItem,
+                  !statusRow.isHidden, !statusRow.isEnabled, statusRow.action == nil,
+                  statusRow.state == .off, statusRow.title == title, statusRow.toolTip == toolTip,
+                  !errorRow.isEnabled, errorRow.action == nil,
+                  errorRow.state == .off, errorRow.isHidden == (failure == nil), errorRow.title == errorTitle,
+                  errorRow.toolTip == failure,
+                  (failure == nil || (visibleItems.count >= 3 && visibleItems[2] === errorRow)),
+                  !statusItem.menu.items.contains(where: { $0.title == "重试播放" }),
+                  statusItem.symbolView.toolTip == toolTip,
+                  statusItem.symbolView.superview?.toolTip == toolTip,
+                  !statusItem.symbolView.subviews.isEmpty,
+                  statusItem.symbolView.subviews.allSatisfy({ $0.toolTip == toolTip }) else {
+                throw NSError(domain: "MotionpaperVerification", code: 17,
+                              userInfo: [NSLocalizedDescriptionKey: "Playback menu or tooltips are incorrect for \(title)"])
+            }
+            try requirePlaybackIndicator(playback: playback, warning: warning)
         }
+        let normalStates: [(PlaybackController.State, String, Bool)] = [
+            (.starting, "正在开始播放…", false),
+            (.enabled, "正在播放动态墙纸", true),
+            (.disabled, "播放已停止", false),
+        ]
+        for (state, title, playback) in normalStates {
+            try requirePlaybackState(.retrying(diagnostic, after: .seconds(1)),
+                                     title: "等待自动重试（间隔 1 秒）", failure: diagnostic,
+                                     errorTitle: diagnostic, warning: true)
+            try requirePlaybackState(state, title: title, playback: playback)
+            try requirePlaybackState(.failed(longDiagnostic), title: "无法播放", failure: longDiagnostic,
+                                     errorTitle: longErrorTitle, warning: true)
+            try requirePlaybackState(state, title: title, playback: playback)
+        }
+        let retryStates: [(PlaybackController.State, String, String, String)] = [
+            (.retrying(exactDiagnostic, after: .seconds(2)), "等待自动重试（间隔 2 秒）", exactDiagnostic, exactDiagnostic),
+            (.retrying(longDiagnostic, after: .seconds(4)), "等待自动重试（间隔 4 秒）", longDiagnostic, longErrorTitle),
+            (.retrying(diagnostic, after: .seconds(8)), "等待自动重试（间隔 8 秒）", diagnostic, diagnostic),
+            (.retrying(diagnostic, after: .seconds(16)), "等待自动重试（间隔 16 秒）", diagnostic, diagnostic),
+            (.retrying(diagnostic, after: .seconds(30)), "等待自动重试（间隔 30 秒）", diagnostic, diagnostic),
+        ]
+        for (state, title, failure, errorTitle) in retryStates {
+            try requirePlaybackState(state, title: title, failure: failure, errorTitle: errorTitle, warning: true)
+        }
+        try requirePlaybackState(.failed(fatalDiagnostic), title: "无法播放", failure: fatalDiagnostic,
+                                 errorTitle: fatalDiagnostic, warning: true)
 
         guard let address = Bundle.main.object(forInfoDictionaryKey: "MotionpaperRepositoryURL") as? String,
               let url = URL(string: address) else {

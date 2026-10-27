@@ -17,6 +17,7 @@ WALLPAPER = "/System/Library/PrivateFrameworks/Wallpaper.framework/Versions/A/Wa
 COMMIT = "b" * 40
 PREVIOUS_COMMIT = "a" * 40
 ACQUIRE_DELAY_SECONDS = 2
+RETRY_DELAY_SECONDS = 1
 
 
 def run(*arguments):
@@ -132,7 +133,7 @@ def launch_case(root, binary, fixture_directory, scenario, should_fail, retry=Fa
 
     events = [line.split() for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
     if should_fail:
-        if not str(report.get("state", "")).startswith("failed("):
+        if not str(report.get("state", "")).startswith("retrying("):
             raise RuntimeError(f"Delayed fixture failure was not reflected in the report: {report}")
         if [event[0] for event in events] != ["failed"]:
             raise RuntimeError(f"Expected only a failed acquisition event, got: {events}")
@@ -149,6 +150,8 @@ def launch_case(root, binary, fixture_directory, scenario, should_fail, retry=Fa
     acquired_monotonic = float(acquired[1])
     if acquired_monotonic - process_started_monotonic < ACQUIRE_DELAY_SECONDS - 0.5:
         raise RuntimeError(f"Fixture acquisition was not delayed as requested: {events[0]}")
+    if retry and acquired_monotonic - float(events[0][1]) < ACQUIRE_DELAY_SECONDS + RETRY_DELAY_SECONDS - 0.5:
+        raise RuntimeError(f"Playback retried before the automatic delay elapsed: {events}")
 
     acquired_unix_ns = int(acquired[2])
     receipt_path = transaction / "launched.json"
@@ -188,6 +191,7 @@ def verify_channel_menus(root, binary, fixture_directory):
         environment = dict(os.environ, DYLD_FRAMEWORK_PATH=str(fixture_directory),
                            MOTIONPAPER_VERIFICATION_DIRECTORY=str(output))
         environment.pop("MOTIONPAPER_ASSERTION_ACQUIRE_FAIL", None)
+        environment.pop("MOTIONPAPER_ASSERTION_ACQUIRE_FAIL_ONCE", None)
         environment.pop("MOTIONPAPER_ASSERTION_ACQUIRE_DELAY_SECONDS", None)
         run_result = subprocess.run([str(executable), "--verify-ui"], env=environment,
                                     capture_output=True, text=True, timeout=20)
@@ -212,7 +216,7 @@ def main():
         verify_channel_menus(root, binary, fixture_directory)
     print("Delayed successful playback wrote a matching update receipt only after acquisition.")
     print("Delayed failed playback exited cleanly without confirming the update launch.")
-    print("Playback recovered through the retry menu after one failed native acquisition.")
+    print("Automatic recovery restored playback after one failed native acquisition.")
     print("Autobuild and stable menus have working update actions and no login checkmarks.")
     print(f"Reports: success={success['phase']}/{success['state']}, failure={failure['phase']}/{failure['state']}")
 

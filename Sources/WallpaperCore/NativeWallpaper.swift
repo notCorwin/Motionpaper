@@ -11,7 +11,7 @@ private class NativeAssertionFactory {
     final class func takeIdleAssertion() async throws -> AnyObject
 }
 
-enum NativeWallpaperError: Error, Equatable, CustomStringConvertible {
+enum NativeWallpaperError: NonRetryablePlaybackError, Equatable, CustomStringConvertible {
     case missingFramework
     case missingSymbols([String])
 

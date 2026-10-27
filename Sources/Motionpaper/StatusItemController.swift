@@ -10,6 +10,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let symbolView = StatusSymbolView()
     let menu = NSMenu()
+    private let playbackStatusItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let errorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let launchAtLoginItem = NSMenuItem(title: "随开机自动启动：否", action: nil, keyEquivalent: "")
     private let loginApprovalItem = NSMenuItem(title: "在系统设置中允许开机启动", action: nil, keyEquivalent: "")
@@ -24,7 +25,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     var onCheckForUpdates: (@MainActor () -> Void)?
     var onInstallUpdate: (@MainActor () -> Void)?
     var onInstallStableRelease: (@MainActor () -> Void)?
-    var onRetryPlayback: (@MainActor () -> Void)?
     var onOpenRepository: (@MainActor () -> Void)?
     var onMenuWillOpen: (@MainActor () -> Void)?
 
@@ -45,10 +45,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             symbolView.widthAnchor.constraint(equalToConstant: 20),
             symbolView.heightAnchor.constraint(equalToConstant: 18),
         ])
-        errorItem.target = self
-        errorItem.action = #selector(retryPlayback)
         errorItem.isEnabled = false
         errorItem.isHidden = true
+        playbackStatusItem.isEnabled = false
         menu.autoenablesItems = false
         menu.delegate = self
         let bundle = Bundle.main
@@ -68,8 +67,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             versionItem.toolTip = "当前提交：\(commit.prefix(12))"
         }
         menu.addItem(versionItem)
-        menu.addItem(.separator())
+        menu.addItem(playbackStatusItem)
         menu.addItem(errorItem)
+        menu.addItem(.separator())
         updateItem.target = self
         updateItem.action = #selector(checkForUpdates)
         menu.addItem(updateItem)
@@ -100,7 +100,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func checkForUpdates() { onCheckForUpdates?() }
     @objc private func installUpdate() { onInstallUpdate?() }
     @objc private func installStableRelease() { onInstallStableRelease?() }
-    @objc private func retryPlayback() { onRetryPlayback?() }
     @objc private func openRepository() { onOpenRepository?() }
     @objc private func openLoginSettings() { SMAppService.openSystemSettingsLoginItems() }
 
@@ -198,25 +197,36 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func update(_ state: PlaybackController.State) {
         symbolView.update(state)
-        errorItem.isHidden = true
-        errorItem.isEnabled = false
-        errorItem.toolTip = nil
-
         let description: String
+        let failure: String?
         switch state {
-        case .disabled: description = "Motionpaper：播放已停止"
-        case .starting: description = "Motionpaper：正在开始播放"
-        case .enabled: description = "Motionpaper：正在播放"
+        case .disabled:
+            description = "播放已停止"
+            failure = nil
+        case .starting:
+            description = "正在开始播放…"
+            failure = nil
+        case .enabled:
+            description = "正在播放动态墙纸"
+            failure = nil
         case .failed(let message):
-            description = "Motionpaper：无法开始播放"
-            errorItem.title = "重试播放"
-            errorItem.toolTip = message
-            errorItem.isEnabled = true
-            errorItem.isHidden = false
+            description = "无法播放"
+            failure = message
+        case .retrying(let message, after: let delay):
+            let components = delay.components
+            let seconds = components.seconds + (components.attoseconds > 0 ? 1 : 0)
+            description = "等待自动重试（间隔 \(seconds) 秒）"
+            failure = message
         }
-        statusItem.button?.toolTip = description
-        statusItem.button?.setAccessibilityLabel(description)
-        symbolView.setAccessibilityLabel(description)
+        playbackStatusItem.title = description
+        errorItem.title = failure.map { $0.count > 40 ? String($0.prefix(40)) + "…" : $0 } ?? ""
+        errorItem.toolTip = failure
+        errorItem.isHidden = failure == nil
+        let toolTip = (["Motionpaper", description] + (failure.map { [$0] } ?? [])).joined(separator: "\n")
+        playbackStatusItem.toolTip = toolTip
+        statusItem.button?.toolTip = toolTip
+        statusItem.button?.setAccessibilityLabel(toolTip)
+        symbolView.updateToolTip(toolTip)
     }
 }
 
@@ -275,11 +285,17 @@ final class StatusSymbolView: NSView {
         let next: Mode = switch state {
         case .disabled, .starting: .inactive
         case .enabled: .playing
-        case .failed: .warning
+        case .failed, .retrying: .warning
         }
         guard next != mode else { return }
         mode = next
         render()
+    }
+
+    func updateToolTip(_ description: String) {
+        toolTip = description
+        imageView.toolTip = description
+        warningImageView.toolTip = description
     }
 
     @objc private nonisolated func accessibilityDisplayOptionsChanged(_ notification: Notification) {
