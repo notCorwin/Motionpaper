@@ -12,12 +12,13 @@ private let catalogURL = URL(string: "https://api.github.com/repos/notCorwin/Mot
 @MainActor
 struct UpdateControllerTests {
     @Test
-    func controllerChecksBothChannelsFromOneCatalogRequest() async throws {
+    func menuOpenChecksBothChannelsFromOneCatalogRequest() async throws {
         let fixture = try UpdateControllerFixture()
 
         var stableChanges: [UpdateManifest?] = []
         fixture.controller.onStableReleaseChange = { stableChanges.append($0) }
         fixture.controller.start()
+        fixture.controller.menuWillOpen()
 
         let resultsArrived = await waitUntil {
             guard stableChanges.contains(where: { $0?.version?.description == "1.2.3" }) else { return false }
@@ -27,13 +28,69 @@ struct UpdateControllerTests {
         if case let .available(manifest) = fixture.controller.state {
             #expect(manifest.commit == autobuildCommit)
         } else {
-            #expect(Bool(false), "The background check should make the Autobuild available.")
+            #expect(Bool(false), "Opening the menu should make the Autobuild available.")
         }
         #expect(stableChanges.count == 2)
         #expect(stableChanges.first.flatMap { $0 } == nil)
         #expect(stableChanges.last.flatMap { $0?.version?.description } == "1.2.3")
         #expect(fixture.protocolState.catalogRequestCount == 1)
         #expect(fixture.protocolState.requestedURLs == [catalogURL])
+
+        await fixture.stopController()
+    }
+
+    @Test
+    func startupDoesNotCheckTheNetwork() async throws {
+        let fixture = try UpdateControllerFixture()
+        let application = Bundle.main.bundleURL
+        try UpdateInstallationFailure.clear(application: application)
+        defer { try? UpdateInstallationFailure.clear(application: application) }
+
+        fixture.controller.start()
+        try await Task.sleep(for: .milliseconds(150))
+
+        #expect(fixture.protocolState.catalogRequestCount == 0)
+        #expect(isIdle(fixture.controller.state))
+        await fixture.stopController()
+    }
+
+    @Test
+    func repeatedMenuOpensWhileCheckingDoNotStartDuplicateRequests() async throws {
+        let fixture = try UpdateControllerFixture()
+
+        fixture.controller.menuWillOpen()
+        #expect(isChecking(fixture.controller.state))
+        for _ in 0..<5 {
+            fixture.controller.menuWillOpen()
+        }
+
+        let updateArrived = await waitUntil { isAvailable(fixture.controller.state) }
+        #expect(updateArrived)
+        #expect(fixture.protocolState.catalogRequestCount == 1)
+
+        await fixture.stopController()
+    }
+
+    @Test
+    func aLaterMenuOpenChecksTheCurrentCatalogAgain() async throws {
+        let fixture = try UpdateControllerFixture()
+        var stableChanges: [UpdateManifest?] = []
+        fixture.controller.onStableReleaseChange = { stableChanges.append($0) }
+
+        fixture.controller.menuWillOpen()
+        let firstCheckFinished = await waitUntil {
+            stableChanges.count == 2 && isAvailable(fixture.controller.state)
+        }
+        #expect(firstCheckFinished)
+        #expect(fixture.protocolState.catalogRequestCount == 1)
+
+        fixture.protocolState.setCatalog(try releasesCatalog(autobuildCommit: String(repeating: "a", count: 40)))
+        fixture.controller.menuWillOpen()
+        let secondCheckFinished = await waitUntil { isUpToDateState(fixture.controller.state) }
+        #expect(secondCheckFinished)
+        #expect(fixture.protocolState.catalogRequestCount == 2)
+        #expect(stableChanges.count == 4)
+        #expect(stableChanges.last.flatMap { $0?.version?.description } == "1.2.3")
 
         await fixture.stopController()
     }
@@ -90,6 +147,28 @@ struct UpdateControllerTests {
     }
 
     @Test
+    func menuOpenShowsPersistedInstallationFailureWithoutStartingACheck() async throws {
+        let fixture = try UpdateControllerFixture()
+        let application = Bundle.main.bundleURL
+        try UpdateInstallationFailure.clear(application: application)
+        defer { try? UpdateInstallationFailure.clear(application: application) }
+
+        let message = "The previous installation could not launch"
+        try UpdateInstallationFailure.record(message: message, application: application)
+        fixture.controller.menuWillOpen()
+
+        #expect(installationFailure(fixture.controller.state)?.manifest == nil)
+        #expect(installationFailure(fixture.controller.state)?.message == message)
+        #expect(fixture.protocolState.catalogRequestCount == 0)
+
+        fixture.controller.menuWillOpen()
+        #expect(installationFailure(fixture.controller.state)?.message == message)
+        #expect(fixture.protocolState.catalogRequestCount == 0)
+
+        await fixture.stopController()
+    }
+
+    @Test
     func installationFailureRecordedDuringCheckAppearsAfterTheCheckAndIsConsumedOnce() async throws {
         let fixture = try UpdateControllerFixture()
         let application = Bundle.main.bundleURL
@@ -131,6 +210,12 @@ struct UpdateControllerTests {
         }
 
         fixture.controller.installAvailableUpdate()
+        #expect(isDownloading(fixture.controller.state))
+        for _ in 0..<5 {
+            fixture.controller.menuWillOpen()
+        }
+        #expect(isDownloading(fixture.controller.state))
+        #expect(fixture.protocolState.catalogRequestCount == 1)
         fixture.controller.installAvailableUpdate()
         #expect(downloadingManifests == [manifest])
 
@@ -143,6 +228,11 @@ struct UpdateControllerTests {
         #expect(firstFailure.manifest == manifest)
         #expect(!firstFailure.message.isEmpty)
         #expect(fixture.protocolState.requestedURLs == [catalogURL])
+
+        fixture.controller.menuWillOpen()
+        #expect(installationFailure(fixture.controller.state)?.manifest == manifest)
+        #expect(installationFailure(fixture.controller.state)?.message == firstFailure.message)
+        #expect(fixture.protocolState.catalogRequestCount == 1)
 
         fixture.controller.installAvailableUpdate()
         fixture.controller.installAvailableUpdate()
@@ -214,8 +304,20 @@ private func isAvailable(_ state: UpdateController.State) -> Bool {
 }
 
 @MainActor
+private func isIdle(_ state: UpdateController.State) -> Bool {
+    if case .idle = state { return true }
+    return false
+}
+
+@MainActor
 private func isChecking(_ state: UpdateController.State) -> Bool {
     if case .checking = state { return true }
+    return false
+}
+
+@MainActor
+private func isDownloading(_ state: UpdateController.State) -> Bool {
+    if case .downloading = state { return true }
     return false
 }
 
@@ -239,9 +341,9 @@ private func installationFailure(_ state: UpdateController.State) -> Installatio
     return nil
 }
 
-private func releasesCatalog() throws -> Data {
-    let autobuildTag = "Autobuild-\(autobuildCommit)"
-    let autobuildName = "Motionpaper-\(autobuildCommit.prefix(12)).dmg"
+private func releasesCatalog(autobuildCommit commit: String = autobuildCommit) throws -> Data {
+    let autobuildTag = "Autobuild-\(commit)"
+    let autobuildName = "Motionpaper-\(commit.prefix(12)).dmg"
     let stableTag = "v1.2.3"
     let stableName = "Motionpaper-v1.2.3.dmg"
     let releases: [[String: Any]] = [

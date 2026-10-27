@@ -8,7 +8,7 @@ https://github.com/user-attachments/assets/a7f37a3f-f820-462d-8bcb-70760ef02e4a
 
 ## 开始使用
 
-需要 macOS 15 或更高版本。安装包同时支持 Apple 芯片与 Intel。macOS 26、27 尚未实机验证。
+需要 macOS 15 或更高版本。macOS 26、27 尚未实机验证。
 
 1. 打开 [下载页面](https://github.com/notCorwin/Motionpaper/releases/latest)，在 Assets 里选 `.dmg`
 2. 打开安装包，把 Motionpaper 拖进「应用程序」

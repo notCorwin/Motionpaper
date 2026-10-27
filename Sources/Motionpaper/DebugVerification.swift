@@ -25,7 +25,7 @@ extension AppDelegate {
         do {
             try FileManager.default.createDirectory(at: verificationOutput, withIntermediateDirectories: true)
             updates.onStateChange = { [weak self] state in self?.statusItem.update(state) }
-            statusItem.onMenuWillOpen = { [weak self] in self?.updates.refreshInstallationFailure() }
+            statusItem.onMenuWillOpen = { [weak self] in self?.updates.menuWillOpen() }
             updates.start()
             if CommandLine.arguments.contains("--verify-menu-only") {
                 Task { @MainActor in
@@ -41,18 +41,26 @@ extension AppDelegate {
                                           userInfo: [NSLocalizedDescriptionKey: "The update check did not expose a retry state"])
                         }
 
-                        _ = try await waitForCheckFailure()
-                        updates.checkForUpdates()
+                        guard case .idle = updates.state else {
+                            throw NSError(domain: "MotionpaperVerification", code: 13,
+                                          userInfo: [NSLocalizedDescriptionKey: "An update check started before the menu opened"])
+                        }
+                        statusItem.menuWillOpen(statusItem.menu)
                         guard case .checking = updates.state else {
                             throw NSError(domain: "MotionpaperVerification", code: 10,
-                                          userInfo: [NSLocalizedDescriptionKey: "The update failure did not allow a manual recheck"])
+                                          userInfo: [NSLocalizedDescriptionKey: "Opening the menu did not start an update check"])
+                        }
+                        _ = try await waitForCheckFailure()
+                        statusItem.menuWillOpen(statusItem.menu)
+                        guard case .checking = updates.state else {
+                            throw NSError(domain: "MotionpaperVerification", code: 14,
+                                          userInfo: [NSLocalizedDescriptionKey: "Reopening the menu did not retry the update check"])
                         }
                         let message = try await waitForCheckFailure()
                         statusItem.update(.idle)
                         try verifyUpdateMenu()
                         let failure = UpdateController.State.checkFailed(message)
                         statusItem.update(failure)
-                        statusItem.menuWillOpen(statusItem.menu)
                         guard let updateItem = statusItem.menu.item(withTitle: "检查更新失败，重试"),
                               updateItem.isEnabled, updateItem.toolTip == message else {
                             throw NSError(domain: "MotionpaperVerification", code: 11,
@@ -170,7 +178,7 @@ extension AppDelegate {
             let titles = windows.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == ProcessInfo.processInfo.processIdentifier }
                 .compactMap { $0[kCGWindowName as String] as? String }
             observations["windowTitles"] = titles
-            statusItem.menuWillOpen(statusItem.menu)
+            statusItem.updateLaunchAtLogin(SMAppService.mainApp.status)
             let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
             let versionTitle = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable"
                 ? "Motionpaper \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")"
@@ -243,7 +251,7 @@ extension AppDelegate {
             statusItem.onMenuWillOpen = originalMenuWillOpen
             statusItem.updateRepositoryError(nil)
             statusItem.update(playback.state)
-            statusItem.menuWillOpen(statusItem.menu)
+            statusItem.updateLaunchAtLogin(SMAppService.mainApp.status)
         }
         func require(_ valid: Bool) throws {
             guard valid else {
@@ -251,6 +259,8 @@ extension AppDelegate {
                               userInfo: [NSLocalizedDescriptionKey: "Login item states or repository action are incorrect"])
             }
         }
+        var menuOpenings = 0
+        statusItem.onMenuWillOpen = { menuOpenings += 1 }
         let login = statusItem.menu.items.first { $0.title.hasPrefix("随开机自动启动：") }
         try require(login?.action != nil && login?.target === statusItem)
         guard let approvalItem = statusItem.menu.item(withTitle: "在系统设置中允许开机启动") else {
@@ -281,8 +291,7 @@ extension AppDelegate {
         }
         try require(login?.title == actualLoginTitle && login?.state == .off
                     && approvalItem.isHidden == (actualLoginStatus != .requiresApproval))
-        var menuOpenings = 0
-        statusItem.onMenuWillOpen = { menuOpenings += 1 }
+        menuOpenings = 0
         statusItem.menuWillOpen(statusItem.menu)
         try require(menuOpenings == 1)
 

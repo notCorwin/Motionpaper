@@ -33,7 +33,7 @@ final class UpdateController {
     private var availableStableRelease: UpdateManifest?
     private var operation: Task<Void, Never>?
     private var stableCheck: Task<Void, Never>?
-    private var automaticCheck: Task<Void, Never>?
+    private var maintenance: Task<Void, Never>?
     private var stopping = false
     private var shutdown: Task<Void, Never>?
     private let logger = Logger(subsystem: "local.motionpaper.app", category: "updates")
@@ -60,23 +60,22 @@ final class UpdateController {
     }
 
     func start() {
-        guard !stopping, automaticCheck == nil else { return }
+        guard !stopping, maintenance == nil else { return }
         refreshInstallationFailure()
-        guard service != nil else { return }
-        automaticCheck = Task { [weak self] in
+        maintenance = Task { [weak self] in
             do { try await UpdateInstaller.removeStaleInstallations(application: Bundle.main.bundleURL) }
             catch {
                 self?.logger.error("Stale update cleanup failed: \(error.localizedDescription, privacy: .public)")
             }
-            while !Task.isCancelled {
-                self?.check(userInitiated: false)
-                do { try await Task.sleep(for: .seconds(6 * 60 * 60)) }
-                catch { return }
-            }
         }
     }
 
-    func checkForUpdates() { check(userInitiated: true) }
+    func menuWillOpen() {
+        refreshInstallationFailure()
+        // Keep an installer failure visible until the user chooses to retry.
+        if case .installFailed = state { return }
+        checkForUpdates()
+    }
 
     func installAvailableUpdate() {
         if case .installFailed(let manifest, _) = state {
@@ -108,34 +107,30 @@ final class UpdateController {
     func stop() -> Task<Void, Never>? {
         if let shutdown { return shutdown }
         stopping = true
-        let checks = automaticCheck
-        checks?.cancel()
-        automaticCheck = nil
+        let cleanup = maintenance
+        cleanup?.cancel()
+        maintenance = nil
         let pending = operation
         pending?.cancel()
         operation = nil
         let stable = stableCheck
         stable?.cancel()
         stableCheck = nil
-        guard checks != nil || pending != nil || stable != nil else { return nil }
+        guard cleanup != nil || pending != nil || stable != nil else { return nil }
         let shutdown = Task { [service] in
             await service?.cancel()
             await pending?.value
             await stable?.value
-            await checks?.value
+            await cleanup?.value
         }
         self.shutdown = shutdown
         return shutdown
     }
 
-    private func check(userInitiated: Bool) {
+    func checkForUpdates() {
         guard !stopping, !state.isBusy, operation == nil else { return }
-        // Keep an installer failure visible until the user chooses to retry.
-        if !userInitiated, case .installFailed = state { return }
         guard let service else {
-            if userInitiated {
-                state = .checkFailed("请使用构建脚本或 GitHub Release 提供的应用。")
-            }
+            state = .checkFailed("请使用构建脚本或 GitHub Release 提供的应用。")
             return
         }
         checkStableRelease()
@@ -153,7 +148,7 @@ final class UpdateController {
             switch result {
             case .success(let manifest):
                 availableUpdate = manifest
-                state = manifest.map(State.available) ?? (userInitiated ? .upToDate : .idle)
+                state = manifest.map(State.available) ?? .upToDate
             case .failure(let error):
                 availableUpdate = nil
                 state = .checkFailed(error.localizedDescription)

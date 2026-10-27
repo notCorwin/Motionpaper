@@ -26,7 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.onInstallStableRelease = { [weak self] in self?.updates.installStableRelease() }
         statusItem.onOpenRepository = { [weak self] in self?.openRepository() }
         statusItem.onRetryPlayback = { [weak self] in self?.playback.setEnabled(true) }
-        statusItem.onMenuWillOpen = { [weak self] in self?.updates.refreshInstallationFailure() }
+        statusItem.onMenuWillOpen = { [weak self] in self?.updates.menuWillOpen() }
         updates.onStateChange = { [weak self] state in self?.statusItem.update(state) }
         updates.onStableReleaseChange = { [weak self] manifest in self?.statusItem.updateStableRelease(manifest) }
         playback.onStateChange = { [weak self] state in
