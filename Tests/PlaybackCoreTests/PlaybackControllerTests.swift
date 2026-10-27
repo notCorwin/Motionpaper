@@ -94,3 +94,52 @@ func failureCanBeRetriedWithoutLeavingAnEnabledState() async throws {
     #expect(acquisitions == 2)
     controller.setEnabled(false)
 }
+
+@Test @MainActor
+func stalledAcquisitionTimesOutCanBeRetriedAndReleasesItsLateResult() async throws {
+    let old = Session()
+    let current = Session()
+    var pending: CheckedContinuation<any PlaybackSession, any Error>?
+    var acquisitions = 0
+    let controller = PlaybackController(acquisitionTimeout: .milliseconds(25)) {
+        acquisitions += 1
+        if acquisitions == 1 {
+            return try await withCheckedThrowingContinuation { pending = $0 }
+        }
+        return current
+    }
+    controller.setEnabled(true)
+    try await waitFor { pending != nil }
+    try await waitFor {
+        if case .failed = controller.state { return true }
+        return false
+    }
+
+    controller.setEnabled(true)
+    try await waitFor { controller.state == .enabled }
+    #expect(acquisitions == 2)
+    pending?.resume(returning: old)
+    try await waitFor { old.releases == 1 }
+    try await Task.sleep(for: .milliseconds(50))
+    #expect(controller.state == .enabled)
+    #expect(current.releases == 0)
+    controller.setEnabled(false)
+    #expect(current.releases == 1)
+}
+
+@Test @MainActor
+func disablingAStalledAcquisitionCancelsItsDeadline() async throws {
+    let session = Session()
+    var pending: CheckedContinuation<any PlaybackSession, any Error>?
+    let controller = PlaybackController(acquisitionTimeout: .milliseconds(25)) {
+        try await withCheckedThrowingContinuation { pending = $0 }
+    }
+    controller.setEnabled(true)
+    try await waitFor { pending != nil }
+    controller.setEnabled(false)
+    try await Task.sleep(for: .milliseconds(50))
+    #expect(controller.state == .disabled)
+    pending?.resume(returning: session)
+    try await waitFor { session.releases == 1 }
+    #expect(controller.state == .disabled)
+}
