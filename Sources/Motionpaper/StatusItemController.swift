@@ -16,7 +16,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let loginApprovalItem = NSMenuItem(title: "在系统设置中允许开机启动", action: nil, keyEquivalent: "")
     private let launchAtLogin = LaunchAtLoginController()
     private var isUpdatingLaunchAtLogin = false
-    private var loginChangeFailure: String?
     private let updateItem = NSMenuItem(title: "检查更新", action: nil, keyEquivalent: "")
     private let stableReleaseItem = NSMenuItem(title: "更新到正式版", action: nil, keyEquivalent: "")
     private let repositoryItem = NSMenuItem(title: "打开 GitHub 仓库", action: nil, keyEquivalent: "")
@@ -109,7 +108,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     func updateLaunchAtLogin(_ status: SMAppService.Status) {
-        if loginChangeFailure != nil {
+        let failure = launchAtLogin.failureMessage
+        if failure != nil {
             launchAtLoginItem.title = "随开机自动启动：更改失败，重试"
         } else if status == .requiresApproval {
             launchAtLoginItem.title = "随开机自动启动：等待允许"
@@ -117,7 +117,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             launchAtLoginItem.title = status == .enabled ? "随开机自动启动：是" : "随开机自动启动：否"
         }
         launchAtLoginItem.state = .off
-        launchAtLoginItem.toolTip = loginChangeFailure ?? (status == .requiresApproval
+        launchAtLoginItem.toolTip = failure ?? (status == .requiresApproval
             ? "请在系统设置的「通用 → 登录项与扩展」中允许 Motionpaper；再次点击可取消。" : nil)
         loginApprovalItem.isHidden = status != .requiresApproval
         // A fresh mainApp service can report .notFound until its first registration.
@@ -127,18 +127,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleLaunchAtLogin() {
         guard !isUpdatingLaunchAtLogin else { return }
         isUpdatingLaunchAtLogin = true
-        loginChangeFailure = nil
         updateLaunchAtLogin(launchAtLogin.status)
         Task {
             defer {
                 isUpdatingLaunchAtLogin = false
                 updateLaunchAtLogin(launchAtLogin.status)
             }
-            do {
-                try await launchAtLogin.toggle()
-            } catch {
-                loginChangeFailure = error.localizedDescription
-            }
+            try? await launchAtLogin.toggle()
         }
     }
 
@@ -175,14 +170,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         case .checkFailed(let message):
             updateItem.title = "检查更新失败，重试"
             updateItem.toolTip = message
-        case .installFailed(let manifest, let message):
+        case .installFailed(let message):
+            updateItem.title = "安装更新失败，重新检查"
             updateItem.toolTip = message
-            if let manifest {
-                updateItem.title = "重试更新并重新启动（\(manifest.version?.description ?? manifest.shortCommit)）"
-                updateItem.action = #selector(installUpdate)
-            } else {
-                updateItem.title = "安装更新失败，重新检查"
-            }
         }
     }
 

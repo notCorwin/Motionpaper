@@ -476,10 +476,10 @@ extension AppDelegate {
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: failedCheckItem))
         try require(checks == 2)
 
-        let missingManifestError = "The previous update target is unavailable"
-        statusItem.update(UpdateController.State.installFailed(nil, missingManifestError))
-        let failedWithoutManifest = try requireUpdateItem("安装更新失败，重新检查", toolTip: missingManifestError)
-        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: failedWithoutManifest))
+        let previousInstallError = "The previous update target is unavailable"
+        statusItem.update(UpdateController.State.installFailed(previousInstallError))
+        let failedInstallation = try requireUpdateItem("安装更新失败，重新检查", toolTip: previousInstallError)
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: failedInstallation))
         try require(checks == 3)
 
         let stableManifest = UpdateManifest(
@@ -547,17 +547,32 @@ extension AppDelegate {
         try require(installs == 1 && checks == 3)
 
         let installError = "The downloaded update could not be installed"
-        statusItem.update(UpdateController.State.installFailed(manifest, installError))
-        let retryTitle = "重试更新并重新启动（aaaaaaaaaaaa）"
+        statusItem.update(UpdateController.State.installFailed(installError))
+        let retryTitle = "安装更新失败，重新检查"
         let retryItem = try requireUpdateItem(retryTitle, toolTip: installError)
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: retryItem))
-        try require(installs == 2 && checks == 3)
+        try require(installs == 1 && checks == 4)
+
+        statusItem.update(UpdateController.State.downloading(stableManifest))
+        statusItem.update(UpdateController.State.installFailed(installError))
+        let failedStableItem = try requireUpdateItem(retryTitle, toolTip: installError)
+        statusItem.menu.performActionForItem(at: statusItem.menu.index(of: failedStableItem))
+        try require(installs == 1 && checks == 5)
+        if !isStableChannel {
+            guard let stableItem = statusItem.menu.item(withTitle: stableTitle) else {
+                try require(false)
+                return
+            }
+            try require(!stableItem.isHidden && stableItem.isEnabled)
+            statusItem.menu.performActionForItem(at: statusItem.menu.index(of: stableItem))
+            try require(stableInstalls == 2 && installs == 1 && checks == 5)
+        }
 
         statusItem.update(UpdateController.State.available(stableManifest))
         let versionedInstallTitle = "更新并重新启动（1.0.0）"
         let versionedItem = try requireUpdateItem(versionedInstallTitle)
         statusItem.menu.performActionForItem(at: statusItem.menu.index(of: versionedItem))
-        try require(installs == 3 && checks == 3)
+        try require(installs == 2 && checks == 5)
 
         statusItem.update(UpdateController.State.downloading(manifest))
         _ = try requireUpdateItem("正在下载更新…", enabled: false)
@@ -579,16 +594,16 @@ extension AppDelegate {
             (.checking, "正在检查更新…", false, nil),
             (.upToDate, "已是最新版本", false, nil),
             (.checkFailed(checkError), "检查更新失败，重试", true, checkError),
-            (.installFailed(nil, missingManifestError), "安装更新失败，重新检查", true, missingManifestError),
+            (.installFailed(previousInstallError), "安装更新失败，重新检查", true, previousInstallError),
         ]
         for (state, title, enabled, toolTip) in checkStates {
-            statusItem.update(UpdateController.State.installFailed(manifest, installError))
+            statusItem.update(UpdateController.State.installFailed(installError))
             statusItem.update(state)
             let item = try requireUpdateItem(title, enabled: enabled, toolTip: toolTip)
             if enabled {
                 let previousChecks = checks
                 statusItem.menu.performActionForItem(at: statusItem.menu.index(of: item))
-                try require(checks == previousChecks + 1 && installs == 3)
+                try require(checks == previousChecks + 1 && installs == 2)
             }
         }
     }

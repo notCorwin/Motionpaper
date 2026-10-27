@@ -12,7 +12,7 @@ final class UpdateController {
         case downloading(UpdateManifest)
         case installing
         case checkFailed(String)
-        case installFailed(UpdateManifest?, String)
+        case installFailed(String)
 
         var isBusy: Bool {
             switch self {
@@ -29,7 +29,6 @@ final class UpdateController {
     var onStableReleaseChange: (@MainActor (UpdateManifest?) -> Void)?
     private let service: UpdateService?
     private let channel: UpdateChannel
-    private var availableUpdate: UpdateManifest?
     private var availableStableRelease: UpdateManifest?
     private var operation: Task<Void, Never>?
     private var stableCheck: Task<Void, Never>?
@@ -72,31 +71,25 @@ final class UpdateController {
 
     func menuWillOpen() {
         refreshInstallationFailure()
-        // Keep an installer failure visible until the user chooses to retry.
+        // Keep an installer failure visible until the user chooses to check again.
         if case .installFailed = state { return }
         checkForUpdates()
     }
 
     func installAvailableUpdate() {
-        if case .installFailed(let manifest, _) = state {
-            if let manifest, let service { install(manifest, using: service) }
-            return
-        }
-        if let availableUpdate, let service { install(availableUpdate, using: service) }
+        guard case .available(let manifest) = state, let service else { return }
+        install(manifest, using: service)
     }
 
     func refreshInstallationFailure() {
         guard !stopping, !state.isBusy, operation == nil else { return }
-        let retry: UpdateManifest?
-        if case .installFailed(let manifest, _) = state { retry = manifest }
-        else { retry = nil }
         do {
             if let failure = try UpdateInstallationFailure.consume(application: Bundle.main.bundleURL) {
-                state = .installFailed(retry, failure.message)
+                state = .installFailed(failure.message)
             }
         } catch {
             logger.error("Unable to read installation result: \(error.localizedDescription, privacy: .public)")
-            state = .installFailed(retry, error.localizedDescription)
+            state = .installFailed(error.localizedDescription)
         }
     }
 
@@ -147,10 +140,8 @@ final class UpdateController {
             guard !Task.isCancelled, !stopping else { return }
             switch result {
             case .success(let manifest):
-                availableUpdate = manifest
                 state = manifest.map(State.available) ?? .upToDate
             case .failure(let error):
-                availableUpdate = nil
                 state = .checkFailed(error.localizedDescription)
                 logger.error("Update check failed: \(error.localizedDescription, privacy: .public)")
             }
@@ -203,7 +194,7 @@ final class UpdateController {
                 operation = nil
                 guard !Task.isCancelled, !stopping else { return }
                 logger.error("Update installation failed: \(error.localizedDescription, privacy: .public)")
-                state = .installFailed(manifest, error.localizedDescription)
+                state = .installFailed(error.localizedDescription)
                 refreshInstallationFailure()
             }
         }

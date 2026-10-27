@@ -157,12 +157,11 @@ struct UpdateControllerTests {
         try UpdateInstallationFailure.record(message: message, application: application)
         fixture.controller.menuWillOpen()
 
-        #expect(installationFailure(fixture.controller.state)?.manifest == nil)
-        #expect(installationFailure(fixture.controller.state)?.message == message)
+        #expect(installationFailure(fixture.controller.state) == message)
         #expect(fixture.protocolState.catalogRequestCount == 0)
 
         fixture.controller.menuWillOpen()
-        #expect(installationFailure(fixture.controller.state)?.message == message)
+        #expect(installationFailure(fixture.controller.state) == message)
         #expect(fixture.protocolState.catalogRequestCount == 0)
 
         await fixture.stopController()
@@ -184,8 +183,7 @@ struct UpdateControllerTests {
         #expect(isChecking(fixture.controller.state))
 
         let reportWasPublished = await waitUntil {
-            guard case let .installFailed(manifest, failure) = fixture.controller.state else { return false }
-            return manifest == nil && failure == message
+            installationFailure(fixture.controller.state) == message
         }
         #expect(reportWasPublished)
         #expect(try UpdateInstallationFailure.consume(application: application) == nil)
@@ -194,7 +192,7 @@ struct UpdateControllerTests {
     }
 
     @Test
-    func failedInstallCanBeRetriedOnceWithTheSameManifest() async throws {
+    func failedInstallCanCheckForANewerReleaseBeforeInstallingAgain() async throws {
         let fixture = try UpdateControllerFixture()
         fixture.controller.checkForUpdates()
         let updateArrived = await waitUntil { isAvailable(fixture.controller.state) }
@@ -225,23 +223,91 @@ struct UpdateControllerTests {
             await fixture.stopController()
             return
         }
-        #expect(firstFailure.manifest == manifest)
-        #expect(!firstFailure.message.isEmpty)
+        #expect(!firstFailure.isEmpty)
         #expect(fixture.protocolState.requestedURLs == [catalogURL])
 
         fixture.controller.menuWillOpen()
-        #expect(installationFailure(fixture.controller.state)?.manifest == manifest)
-        #expect(installationFailure(fixture.controller.state)?.message == firstFailure.message)
+        #expect(installationFailure(fixture.controller.state) == firstFailure)
         #expect(fixture.protocolState.catalogRequestCount == 1)
 
         fixture.controller.installAvailableUpdate()
         fixture.controller.installAvailableUpdate()
-        #expect(downloadingManifests == [manifest, manifest])
+        #expect(downloadingManifests == [manifest])
+        #expect(installationFailure(fixture.controller.state) == firstFailure)
+
+        let newerCommit = String(repeating: "d", count: 40)
+        fixture.protocolState.setCatalog(try releasesCatalog(autobuildCommit: newerCommit))
+        fixture.controller.checkForUpdates()
+        let newerUpdateArrived = await waitUntil { isAvailable(fixture.controller.state) }
+        #expect(newerUpdateArrived)
+        guard case let .available(newerManifest) = fixture.controller.state else {
+            await fixture.stopController()
+            return
+        }
+        #expect(newerManifest.commit == newerCommit)
+
+        fixture.controller.installAvailableUpdate()
+        fixture.controller.installAvailableUpdate()
+        #expect(downloadingManifests == [manifest, newerManifest])
 
         let secondFailureArrived = await waitUntil { installationFailure(fixture.controller.state) != nil }
         #expect(secondFailureArrived)
-        #expect(installationFailure(fixture.controller.state)?.manifest == manifest)
-        #expect(fixture.protocolState.requestedURLs == [catalogURL])
+        #expect(fixture.protocolState.requestedURLs == [catalogURL, catalogURL])
+
+        await fixture.stopController()
+    }
+
+    @Test
+    func failedInstallDoesNotOfferTheOldTargetWhenTheNextCheckFails() async throws {
+        let fixture = try UpdateControllerFixture()
+        fixture.controller.checkForUpdates()
+        #expect(await waitUntil { isAvailable(fixture.controller.state) })
+
+        var attempts = 0
+        fixture.controller.onStateChange = { state in
+            if isDownloading(state) { attempts += 1 }
+        }
+        fixture.controller.installAvailableUpdate()
+        #expect(await waitUntil { installationFailure(fixture.controller.state) != nil })
+
+        fixture.protocolState.setCatalog(Data("not a release catalog".utf8))
+        fixture.controller.checkForUpdates()
+        #expect(await waitUntil { checkFailure(fixture.controller.state) != nil })
+        fixture.controller.installAvailableUpdate()
+        #expect(attempts == 1)
+        #expect(checkFailure(fixture.controller.state) != nil)
+
+        await fixture.stopController()
+    }
+
+    @Test
+    func failedStableInstallCanRecheckAndUseTheNewStableRelease() async throws {
+        let fixture = try UpdateControllerFixture(currentCommit: autobuildCommit)
+        var stableRelease: UpdateManifest?
+        fixture.controller.onStableReleaseChange = { stableRelease = $0 }
+        fixture.controller.checkForUpdates()
+        #expect(await waitUntil { stableRelease != nil && isUpToDateState(fixture.controller.state) })
+
+        var downloadingManifests: [UpdateManifest] = []
+        fixture.controller.onStateChange = { state in
+            if case let .downloading(manifest) = state { downloadingManifests.append(manifest) }
+        }
+        fixture.controller.installStableRelease()
+        #expect(await waitUntil { installationFailure(fixture.controller.state) != nil })
+        #expect(downloadingManifests.map { $0.version?.description } == ["1.2.3"])
+        fixture.controller.installAvailableUpdate()
+        #expect(downloadingManifests.count == 1)
+
+        fixture.protocolState.setCatalog(try releasesCatalog(stableVersion: "1.2.4"))
+        fixture.controller.checkForUpdates()
+        #expect(await waitUntil {
+            stableRelease?.version?.description == "1.2.4" && isUpToDateState(fixture.controller.state)
+        })
+        fixture.controller.installStableRelease()
+        fixture.controller.installStableRelease()
+        #expect(downloadingManifests.map { $0.version?.description } == ["1.2.3", "1.2.4"])
+        #expect(await waitUntil { installationFailure(fixture.controller.state) != nil })
+        #expect(fixture.protocolState.catalogRequestCount == 2)
 
         await fixture.stopController()
     }
@@ -276,11 +342,6 @@ private final class UpdateControllerFixture {
         session.invalidateAndCancel()
         try? FileManager.default.removeItem(at: directory)
     }
-}
-
-private struct InstallationFailure {
-    let manifest: UpdateManifest?
-    let message: String
 }
 
 @MainActor
@@ -334,18 +395,19 @@ private func checkFailure(_ state: UpdateController.State) -> String? {
 }
 
 @MainActor
-private func installationFailure(_ state: UpdateController.State) -> InstallationFailure? {
-    if case let .installFailed(manifest, message) = state {
-        return InstallationFailure(manifest: manifest, message: message)
+private func installationFailure(_ state: UpdateController.State) -> String? {
+    if case let .installFailed(message) = state {
+        return message
     }
     return nil
 }
 
-private func releasesCatalog(autobuildCommit commit: String = autobuildCommit) throws -> Data {
+private func releasesCatalog(autobuildCommit commit: String = autobuildCommit,
+                             stableVersion: String = "1.2.3") throws -> Data {
     let autobuildTag = "Autobuild-\(commit)"
     let autobuildName = "Motionpaper-\(commit.prefix(12)).dmg"
-    let stableTag = "v1.2.3"
-    let stableName = "Motionpaper-v1.2.3.dmg"
+    let stableTag = "v\(stableVersion)"
+    let stableName = "Motionpaper-v\(stableVersion).dmg"
     let releases: [[String: Any]] = [
         [
             "tag_name": autobuildTag,
