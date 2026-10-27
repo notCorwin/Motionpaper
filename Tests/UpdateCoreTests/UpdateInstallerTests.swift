@@ -116,11 +116,42 @@ private let mismatchedCommit = String(repeating: "d", count: 40)
     #expect(!FileManager.default.fileExists(atPath: update.directory.path))
 }
 
-@Test func testUpdateInstallerConfirmsLaunchForMatchingApplicationAndFullCommit() async throws {
+@Test(arguments: [false, true])
+func testUpdateInstallerRejectsSameCommitPackageChangedAfterPreparation(inPlace: Bool) async throws {
+    let fixture = try InstallerFixture()
+    defer { fixture.cleanUp() }
+    let update = try fixture.makeUpdate(commit: candidateCommit)
+    let changed = fixture.root.appendingPathComponent("Stable.app", isDirectory: true)
+    try makeApplication(at: changed, commit: originalCommit, channel: "stable")
+    let source = inPlace ? changed.appendingPathComponent("Contents") : changed
+    let destination = inPlace ? fixture.destination.appendingPathComponent("Contents") : fixture.destination
+    try FileManager.default.removeItem(at: destination)
+    try FileManager.default.moveItem(at: source, to: destination)
+
+    await #expect(throws: UpdateError.self) {
+        try await update.install { _, _ in }
+    }
+
+    #expect(try UpdateInstaller.bundleCommit(fixture.destination) == originalCommit)
+    let information = try Data(contentsOf: fixture.destination.appendingPathComponent("Contents/Info.plist"))
+    let metadata = try #require(PropertyListSerialization.propertyList(from: information, format: nil) as? [String: Any])
+    #expect(metadata["MotionpaperReleaseChannel"] as? String == "stable")
+    #expect(!FileManager.default.fileExists(atPath: update.directory.path))
+}
+
+@Test(arguments: [false, true])
+func testUpdateInstallerConfirmsLaunchForMatchingApplicationAndFullCommit(installerMetadata: Bool) async throws {
     let fixture = try InstallerFixture()
     defer { fixture.cleanUp() }
     let update = try fixture.makeUpdate(commit: candidateCommit)
     try fixture.writePlan(update)
+    if !installerMetadata {
+        let path = update.directory.appendingPathComponent("update.json")
+        let data = try Data(contentsOf: path)
+        var plan = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        plan.removeValue(forKey: "previousIdentity")
+        try JSONSerialization.data(withJSONObject: plan).write(to: path, options: .atomic)
+    }
     let pid = ProcessInfo.processInfo.processIdentifier
 
     #expect(throws: UpdateError.self) {
@@ -158,19 +189,59 @@ private let mismatchedCommit = String(repeating: "d", count: 40)
     #expect(try UpdateInstaller.bundleCommit(fixture.destination) == originalCommit)
 }
 
-@Test func testUpdateInstallerStaleCleanupPreservesUnconfirmedPreviousVersion() async throws {
+@Test func preparationAndHelperLeasesOverlapWithoutAllowingDuplicateInstallers() async throws {
     let fixture = try InstallerFixture()
     defer { fixture.cleanUp() }
-    let update = try fixture.makeUpdate(commit: candidateCommit, applicationCommit: originalCommit)
+    let contents = fixture.root.appendingPathComponent("ImageContents", isDirectory: true)
+    try makeApplication(at: contents.appendingPathComponent("Motionpaper.app"), commit: candidateCommit)
+    let image = fixture.root.appendingPathComponent("Update.dmg")
+    try runCommand("/usr/bin/hdiutil", ["create", "-quiet", "-srcfolder", contents.path,
+                                      "-format", "UDZO", image.path])
+    let manifest = UpdateManifest(commit: candidateCommit, publishedAt: Date(), downloadURL: image,
+                                  sha256: String(repeating: "0", count: 64), size: 1)
+    let update = try await UpdateInstaller.prepare(image: image, manifest: manifest, application: fixture.destination)
+
+    try await UpdateInstaller.removeStaleInstallations(application: fixture.destination)
+    #expect(FileManager.default.fileExists(atPath: update.directory.path))
+
+    let helper = try PreparedUpdate.load(from: update.directory)
+    let lease = try helper.acquireLease()
+    defer { try? lease.close() }
+    let installerLease = try helper.acquireInstallerLease()
+    defer { try? installerLease.close() }
+    #expect(throws: UpdateError.self) { try helper.acquireInstallerLease() }
+
+    try update.preparationLease?.close()
+    #expect(try UpdateInstaller.installationInProgress(application: fixture.destination))
+    try await UpdateInstaller.removeStaleInstallations(application: fixture.destination)
+    #expect(FileManager.default.fileExists(atPath: update.directory.path))
+
+    try installerLease.close()
+    try lease.close()
+    try await UpdateInstaller.removeStaleInstallations(application: fixture.destination)
+    #expect(!FileManager.default.fileExists(atPath: update.directory.path))
+}
+
+@Test(arguments: [candidateCommit, originalCommit])
+func testUpdateInstallerStaleCleanupPreservesUnconfirmedPreviousVersion(commit: String) async throws {
+    let fixture = try InstallerFixture()
+    defer { fixture.cleanUp() }
+    let update = try fixture.makeUpdate(commit: commit, applicationCommit: originalCommit)
     try fixture.writePlan(update)
+    try Data(commit.utf8).write(to: update.authorization, options: .atomic)
     // Arrange the persisted state after a swap whose launch or rollback never completed.
     try FileManager.default.removeItem(at: fixture.destination)
-    try makeApplication(at: fixture.destination, commit: candidateCommit)
+    try makeApplication(at: fixture.destination, commit: commit, channel: "stable")
 
     try await UpdateInstaller.removeStaleInstallations(application: fixture.destination)
 
     #expect(try UpdateInstaller.bundleCommit(update.replacement) == originalCommit)
-    #expect(try UpdateInstaller.bundleCommit(fixture.destination) == candidateCommit)
+    #expect(try UpdateInstaller.bundleCommit(fixture.destination) == commit)
+
+    try Data().write(to: update.completed, options: .atomic)
+    try await UpdateInstaller.removeStaleInstallations(application: fixture.destination)
+    #expect(!FileManager.default.fileExists(atPath: update.directory.path))
+    #expect(try UpdateInstaller.bundleCommit(fixture.destination) == commit)
 }
 
 @Test func releasingLeaseUnlocksInheritedDescriptorsAndCannotCloseANewerLease() throws {
@@ -227,7 +298,8 @@ private struct InstallerFixture {
                 try FileManager.default.removeItem(at: replacement.appendingPathComponent("Contents/_CodeSignature"))
             }
             return PreparedUpdate(directory: directory, destination: destination,
-                                  commit: commit, previousCommit: originalCommit)
+                                  commit: commit, previousCommit: originalCommit,
+                                  previousIdentity: try UpdateInstaller.applicationIdentity(destination))
         } catch {
             try? FileManager.default.removeItem(at: directory)
             throw error
@@ -253,6 +325,10 @@ private func makeApplication(at application: URL, commit: String,
     try manager.createDirectory(at: executableDirectory, withIntermediateDirectories: true)
     try manager.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"),
                          to: executableDirectory.appendingPathComponent("Motionpaper"))
+    let helpers = contents.appendingPathComponent("Helpers", isDirectory: true)
+    try manager.createDirectory(at: helpers, withIntermediateDirectories: false)
+    try manager.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"),
+                         to: helpers.appendingPathComponent("MotionpaperUpdater"))
     let information: [String: String] = [
         "CFBundleIdentifier": bundleIdentifier,
         "CFBundleExecutable": "Motionpaper",
@@ -266,13 +342,13 @@ private func makeApplication(at application: URL, commit: String,
     let data = try PropertyListSerialization.data(fromPropertyList: information, format: .xml, options: 0)
     try data.write(to: contents.appendingPathComponent("Info.plist"))
 
-    try runCodeSign(["--force", "--deep", "--strict", "--sign", "-",
-                     "--identifier", bundleIdentifier, application.path])
+    try runCommand("/usr/bin/codesign", ["--force", "--deep", "--strict", "--sign", "-",
+                                       "--identifier", bundleIdentifier, application.path])
 }
 
-private func runCodeSign(_ arguments: [String]) throws {
+private func runCommand(_ executable: String, _ arguments: [String]) throws {
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+    process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
     process.standardInput = FileHandle.nullDevice
     process.standardOutput = FileHandle.nullDevice
@@ -280,12 +356,12 @@ private func runCodeSign(_ arguments: [String]) throws {
     try process.run()
     process.waitUntilExit()
     guard process.terminationStatus == 0 else {
-        throw InstallerTestError.codeSignFailed(process.terminationStatus)
+        throw InstallerTestError.commandFailed(executable, process.terminationStatus)
     }
 }
 
 private enum InstallerTestError: Error {
-    case codeSignFailed(Int32)
+    case commandFailed(String, Int32)
 }
 
 private actor RelaunchProbe {

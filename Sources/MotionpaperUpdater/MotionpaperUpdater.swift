@@ -18,6 +18,8 @@ enum MotionpaperUpdater {
             let update = try PreparedUpdate.load(from: directory)
             let lease = try update.acquireLease()
             defer { try? lease.close() }
+            let installerLease = try update.acquireInstallerLease()
+            defer { try? installerLease.close() }
             prepared = update
             guard let parent = NSRunningApplication(processIdentifier: pid),
                   parent.bundleURL?.resolvingSymlinksInPath() == update.destination else {

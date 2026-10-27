@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -20,14 +21,15 @@ public enum UpdateInstaller {
         let destination = application.resolvingSymlinksInPath()
         try validateDestination(destination)
         let previousCommit = try bundleCommit(destination)
+        let previousIdentity = try applicationIdentity(destination)
         let directory = destination.deletingLastPathComponent()
             .appendingPathComponent(".motionpaper-update-\(UUID().uuidString)", isDirectory: true)
         try manager.createDirectory(at: directory, withIntermediateDirectories: false,
                                     attributes: [.posixPermissions: 0o700])
-        let update = PreparedUpdate(directory: directory, destination: destination,
-                                    commit: manifest.commit, previousCommit: previousCommit)
-        let lease = try update.acquireLease()
-        defer { try? lease.close() }
+        var update = PreparedUpdate(directory: directory, destination: destination,
+                                    commit: manifest.commit, previousCommit: previousCommit,
+                                    previousIdentity: previousIdentity)
+        update.preparationLease = try update.acquireLease()
         var prepared = false
         defer { if !prepared { update.discard() } }
 
@@ -82,12 +84,11 @@ public enum UpdateInstaller {
             do { lease = try acquireLease(directory: directory) }
             catch UpdateError.installationInProgress { continue }
             defer { try? lease.close() }
-            if let update {
-                // An interrupted swap or failed rollback may hold the only recoverable old app.
-                if (try? bundleCommit(update.replacement)) != update.commit,
-                   !FileManager.default.fileExists(atPath: update.completed.path) { continue }
-            } else if FileManager.default.fileExists(atPath: directory.appendingPathComponent("install").path),
-                      !FileManager.default.fileExists(atPath: directory.appendingPathComponent("completed").path) {
+            // Authorized transactions may hold the only recoverable old app.
+            // A commit cannot identify which side of the swap is here: stable
+            // and Autobuild releases can be built from the same commit.
+            if FileManager.default.fileExists(atPath: directory.appendingPathComponent("install").path),
+               !FileManager.default.fileExists(atPath: directory.appendingPathComponent("completed").path) {
                 continue
             }
             let mount = directory.appendingPathComponent("Image", isDirectory: true)
@@ -109,16 +110,26 @@ public enum UpdateInstaller {
             .map { $0.resolvingSymlinksInPath() }
     }
 
-    static func acquireLease(directory: URL) throws -> UpdateLease {
-        let descriptor = open(directory.appendingPathComponent("lock").path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+    static func acquireLease(directory: URL, shared: Bool = false, lockFile: String = "lock") throws -> UpdateLease {
+        let descriptor = open(directory.appendingPathComponent(lockFile).path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+        guard flock(descriptor, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB) == 0 else {
             let code = errno
             close(descriptor)
             if code == EWOULDBLOCK { throw UpdateError.installationInProgress }
             throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
         return UpdateLease(fileDescriptor: descriptor)
+    }
+
+    static func applicationIdentity(_ application: URL) throws -> String {
+        var metadata = stat()
+        guard lstat(application.path, &metadata) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let information = try Data(contentsOf: application.appendingPathComponent("Contents/Info.plist"))
+        let digest = SHA256.hash(data: information).map { String(format: "%02x", $0) }.joined()
+        return "\(metadata.st_dev):\(metadata.st_ino):\(digest)"
     }
 
     static func bundleCommit(_ application: URL) throws -> String {
@@ -168,6 +179,12 @@ public struct PreparedUpdate: Codable, Sendable {
     public let destination: URL
     public let commit: String
     let previousCommit: String
+    let previousIdentity: String
+    var preparationLease: UpdateLease? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case directory, destination, commit, previousCommit, previousIdentity
+    }
 
     var replacement: URL { directory.appendingPathComponent("Motionpaper.app", isDirectory: true) }
     public var helper: URL { directory.appendingPathComponent("MotionpaperUpdater") }
@@ -176,22 +193,35 @@ public struct PreparedUpdate: Codable, Sendable {
     private var confirmation: URL { directory.appendingPathComponent("launched.json") }
     var completed: URL { directory.appendingPathComponent("completed") }
 
-    public func acquireLease() throws -> UpdateLease { try UpdateInstaller.acquireLease(directory: directory) }
+    // Preparation and the helper overlap their shared leases; cleanup requires
+    // an exclusive lease, so the transaction stays protected during handoff.
+    public func acquireLease() throws -> UpdateLease {
+        try UpdateInstaller.acquireLease(directory: directory, shared: true)
+    }
+
+    public func acquireInstallerLease() throws -> UpdateLease {
+        try UpdateInstaller.acquireLease(directory: directory, lockFile: "installer-lock")
+    }
 
     public static func load(from directory: URL) throws -> Self {
         let data = try Data(contentsOf: directory.appendingPathComponent("update.json"))
         let update = try JSONDecoder().decode(Self.self, from: data)
-        guard update.directory == directory,
-              directory.lastPathComponent.hasPrefix(".motionpaper-update-"),
-              directory.deletingLastPathComponent() == update.destination.deletingLastPathComponent(),
-              directory.resolvingSymlinksInPath() == directory,
-              update.destination.resolvingSymlinksInPath() == update.destination else {
-            throw UpdateError.invalidApplication
-        }
+        try validateLocation(recordedDirectory: update.directory, destination: update.destination, directory: directory)
         return update
     }
 
+    private static func validateLocation(recordedDirectory: URL, destination: URL, directory: URL) throws {
+        guard recordedDirectory == directory,
+              directory.lastPathComponent.hasPrefix(".motionpaper-update-"),
+              directory.deletingLastPathComponent() == destination.deletingLastPathComponent(),
+              directory.resolvingSymlinksInPath() == directory,
+              destination.resolvingSymlinksInPath() == destination else {
+            throw UpdateError.invalidApplication
+        }
+    }
+
     public func startInstaller(parentPID: Int32) async throws {
+        defer { try? preparationLease?.close() }
         let process = Process()
         process.executableURL = helper
         process.arguments = [directory.path, String(parentPID)]
@@ -227,13 +257,18 @@ public struct PreparedUpdate: Codable, Sendable {
         guard index + 2 < arguments.count, arguments[index + 2] == commit else {
             throw UpdateError.invalidApplication
         }
-        let update = try load(from: URL(fileURLWithPath: arguments[index + 1], isDirectory: true))
+        // Launch confirmation has its own small protocol. The new app must not
+        // decode installer-only state written by the app that initiated the update.
+        let directory = URL(fileURLWithPath: arguments[index + 1], isDirectory: true)
+        let data = try Data(contentsOf: directory.appendingPathComponent("update.json"))
+        let update = try JSONDecoder().decode(LaunchPlan.self, from: data)
+        try validateLocation(recordedDirectory: update.directory, destination: update.destination, directory: directory)
         guard update.destination == application.resolvingSymlinksInPath(),
               commit == update.commit || commit == update.previousCommit else {
             throw UpdateError.invalidApplication
         }
         let receipt = LaunchReceipt(commit: commit, pid: pid)
-        try JSONEncoder().encode(receipt).write(to: update.confirmation, options: .atomic)
+        try JSONEncoder().encode(receipt).write(to: directory.appendingPathComponent("launched.json"), options: .atomic)
     }
 
     public func waitForLaunch(pid: Int32, commit: String) async throws {
@@ -253,7 +288,7 @@ public struct PreparedUpdate: Codable, Sendable {
         var preserveBackup = false
         defer { if !preserveBackup { discard() } }
         try UpdateInstaller.validateDestination(destination)
-        guard try UpdateInstaller.bundleCommit(destination) == previousCommit else {
+        guard try UpdateInstaller.applicationIdentity(destination) == previousIdentity else {
             throw UpdateError.installationChanged
         }
         try UpdateInstaller.validateApplication(replacement, commit: commit)
@@ -278,7 +313,17 @@ public struct PreparedUpdate: Codable, Sendable {
         }
     }
 
-    public func discard() { try? FileManager.default.removeItem(at: directory) }
+    public func discard() {
+        try? FileManager.default.removeItem(at: directory)
+        try? preparationLease?.close()
+    }
+}
+
+private struct LaunchPlan: Decodable {
+    let directory: URL
+    let destination: URL
+    let commit: String
+    let previousCommit: String
 }
 
 private struct LaunchReceipt: Codable {
