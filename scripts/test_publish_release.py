@@ -298,9 +298,9 @@ class PublishReleaseTests(unittest.TestCase):
         result, state = self.publish(state, commit, branch=branch)
         self.assert_success(result)
         expected = (
-            f"基于 {branch} 分支提交 `{commit[:7]}` 自动构建的版本。\n"
+            f"基于 {branch} 分支提交 [`{commit[:7]}`](https://github.com/{REPOSITORY}/commit/{commit}) 自动构建的版本。\n"
             f"此版本可能存在 Bug，建议使用 [Latest](https://github.com/{REPOSITORY}/releases/latest)。\n\n"
-            f"Automatically built from commit `{commit[:7]}` on the {branch} branch.\n"
+            f"Automatically built from commit [`{commit[:7]}`](https://github.com/{REPOSITORY}/commit/{commit}) on the {branch} branch.\n"
             f"This build may contain bugs. We recommend using [Latest](https://github.com/{REPOSITORY}/releases/latest)."
         )
         self.assertEqual(state["releases"][0]["body"].rstrip("\n"), expected)
@@ -322,7 +322,7 @@ class PublishReleaseTests(unittest.TestCase):
         offset = len(state["calls"])
         result, state = self.publish(state, commit)
         self.assert_success(result)
-        self.assertIn(f"提交 `{commit[:7]}`", state["releases"][0]["body"])
+        self.assertIn(f"提交 [`{commit[:7]}`](https://github.com/{REPOSITORY}/commit/{commit})", state["releases"][0]["body"])
         self.assertEqual(state["releases"][0]["assets"], old_assets)
         self.assertFalse(uploads(state["calls"][offset:]))
         self.assertFalse(any(call[:2] == ["release", "download"] for call in state["calls"][offset:]))
@@ -364,7 +364,7 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertEqual(len(state["releases"]), 1)
         release = state["releases"][0]
         self.assertEqual(release["target_commitish"], first_commit)
-        self.assertIn(f"commit `{second_commit[:7]}` on the main branch", release["body"])
+        self.assertIn(f"commit [`{second_commit[:7]}`](https://github.com/{REPOSITORY}/commit/{second_commit}) on the main branch", release["body"])
         self.assertEqual({item["name"] for item in release["assets"]},
                          {f"Motionpaper-{second_commit[:12]}.dmg", "update.json"})
         self.assertEqual(len(release["assets"]), 2)
