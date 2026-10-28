@@ -17,7 +17,7 @@ WALLPAPER = "/System/Library/PrivateFrameworks/Wallpaper.framework/Versions/A/Wa
 COMMIT = "b" * 40
 PREVIOUS_COMMIT = "a" * 40
 ACQUIRE_DELAY_SECONDS = 2
-RETRY_DELAY_SECONDS = 1
+RETRY_DELAY_SECONDS = 3
 
 
 def run(*arguments):

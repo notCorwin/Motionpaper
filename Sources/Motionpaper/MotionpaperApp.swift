@@ -98,7 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 #if DEBUG
 private struct WarningPreviewError: Error, CustomStringConvertible {
-    let description = "警告图标效果预览：模拟播放失败"
+    let description = "墙纸服务暂时没有响应。"
 }
 #endif
 

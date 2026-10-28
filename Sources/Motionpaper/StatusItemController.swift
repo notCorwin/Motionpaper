@@ -11,7 +11,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     let symbolView = StatusSymbolView()
     let menu = NSMenu()
     private let playbackStatusItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let errorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let launchAtLoginItem = NSMenuItem(title: "随开机自动启动：否", action: nil, keyEquivalent: "")
     private let loginApprovalItem = NSMenuItem(title: "在系统设置中允许开机启动", action: nil, keyEquivalent: "")
     private let launchAtLogin = LaunchAtLoginController()
@@ -44,8 +43,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             symbolView.widthAnchor.constraint(equalToConstant: 20),
             symbolView.heightAnchor.constraint(equalToConstant: 18),
         ])
-        errorItem.isEnabled = false
-        errorItem.isHidden = true
         playbackStatusItem.isEnabled = false
         menu.autoenablesItems = false
         menu.delegate = self
@@ -67,7 +64,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         menu.addItem(versionItem)
         menu.addItem(playbackStatusItem)
-        menu.addItem(errorItem)
         menu.addItem(.separator())
         updateItem.target = self
         updateItem.action = #selector(checkForUpdates)
@@ -194,24 +190,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             description = "播放已停止"
             failure = nil
         case .starting:
-            description = "正在开始播放…"
+            description = "正在准备播放…"
             failure = nil
         case .enabled:
-            description = "正在播放动态墙纸"
+            description = "正在播放"
             failure = nil
         case .failed(let message):
             description = "无法播放"
             failure = message
-        case .retrying(let message, after: let delay):
-            let components = delay.components
-            let seconds = components.seconds + (components.attoseconds > 0 ? 1 : 0)
-            description = "等待自动重试（间隔 \(seconds) 秒）"
+        case .retrying(let message):
+            description = "正在恢复播放…"
             failure = message
         }
         playbackStatusItem.title = description
-        errorItem.title = failure.map { $0.count > 40 ? String($0.prefix(40)) + "…" : $0 } ?? ""
-        errorItem.toolTip = failure
-        errorItem.isHidden = failure == nil
         let toolTip = (["Motionpaper", description] + (failure.map { [$0] } ?? [])).joined(separator: "\n")
         playbackStatusItem.toolTip = toolTip
         statusItem.button?.toolTip = toolTip

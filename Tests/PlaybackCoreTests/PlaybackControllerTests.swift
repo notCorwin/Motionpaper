@@ -78,76 +78,56 @@ func anOldRequestCannotReplaceANewerSession() async throws {
 }
 
 @Test @MainActor
-func transientFailureRecoversAutomaticallyWithoutBypassingTheDelay() async throws {
-    let delay = Duration.milliseconds(40)
+func successiveFailuresRetryAtTheSameIntervalDespiteRepeatedEnable() async throws {
+    let interval = Duration.milliseconds(150)
     let session = Session()
-    var acquisitions = 0
-    var retryStarted: ContinuousClock.Instant?
-    var recoveredAt: ContinuousClock.Instant?
-    var stateAfterDuplicateEnable: PlaybackController.State?
-    let controller = PlaybackController(retryDelays: [delay]) {
-        acquisitions += 1
-        if acquisitions == 1 { throw TransientFailure.unavailable }
-        recoveredAt = .now
+    var acquisitions: [ContinuousClock.Instant] = []
+    var retries: [ContinuousClock.Instant] = []
+    var states: [PlaybackController.State] = []
+    var duplicateEnablesPreservedRetryState = true
+    let controller = PlaybackController(retryInterval: interval) {
+        acquisitions.append(.now)
+        if acquisitions.count <= 3 { throw TransientFailure.unavailable }
         return session
     }
     controller.onStateChange = { [weak controller] state in
+        states.append(state)
         if case .retrying = state {
-            retryStarted = .now
+            retries.append(.now)
             controller?.setEnabled(true)
             controller?.setEnabled(true)
-            stateAfterDuplicateEnable = controller?.state
+            duplicateEnablesPreservedRetryState = duplicateEnablesPreservedRetryState
+                && controller?.state == state
         }
     }
 
     controller.setEnabled(true)
+    for count in 1...3 {
+        try await waitFor { retries.count >= count }
+        try await Task.sleep(for: .milliseconds(40))
+        controller.setEnabled(true)
+        controller.setEnabled(true)
+    }
     try await waitFor { controller.state == .enabled }
-    #expect(acquisitions == 2)
-    #expect(stateAfterDuplicateEnable == .retrying("unavailable", after: delay))
-    if let retryStarted, let recoveredAt {
-        #expect(retryStarted.duration(to: recoveredAt) >= delay)
-    } else {
-        Issue.record("Expected a retry followed by automatic recovery")
+    #expect(acquisitions.count == 4)
+    #expect(retries.count == 3)
+    #expect(states.filter { $0 == .starting }.count == 1)
+    #expect(duplicateEnablesPreservedRetryState)
+    if acquisitions.count == 4, retries.count == 3 {
+        for (retry, acquisition) in zip(retries, acquisitions.dropFirst()) {
+            let elapsed = retry.duration(to: acquisition)
+            #expect(elapsed >= interval)
+            #expect(elapsed < interval + .milliseconds(125))
+        }
     }
     controller.setEnabled(false)
     #expect(session.releases == 1)
 }
 
 @Test @MainActor
-func retryDelaysIncreaseCapAndResetForANewEnable() async throws {
-    let short = Duration.milliseconds(5)
-    let long = Duration.milliseconds(10)
-    let first = Session()
-    let second = Session()
-    var acquisitions = 0
-    var delays: [Duration] = []
-    let controller = PlaybackController(retryDelays: [short, long]) {
-        acquisitions += 1
-        if acquisitions <= 4 || acquisitions == 6 { throw TransientFailure.unavailable }
-        return acquisitions == 5 ? first : second
-    }
-    controller.onStateChange = { state in
-        if case .retrying(_, let delay) = state { delays.append(delay) }
-    }
-
-    controller.setEnabled(true)
-    try await waitFor { controller.state == .enabled }
-    #expect(acquisitions == 5)
-    #expect(delays == [short, long, long, long])
-    controller.setEnabled(false)
-    #expect(first.releases == 1)
-    controller.setEnabled(true)
-    try await waitFor { controller.state == .enabled }
-    #expect(acquisitions == 7)
-    #expect(delays == [short, long, long, long, short])
-    controller.setEnabled(false)
-    #expect(second.releases == 1)
-}
-
-@Test @MainActor
 func disablingWhileWaitingCancelsTheRetry() async throws {
     var acquisitions = 0
-    let controller = PlaybackController(retryDelays: [.milliseconds(40)]) {
+    let controller = PlaybackController(retryInterval: .milliseconds(40)) {
         acquisitions += 1
         throw TransientFailure.unavailable
     }
@@ -163,57 +143,33 @@ func disablingWhileWaitingCancelsTheRetry() async throws {
 }
 
 @Test @MainActor
-func disablingDuringBackoffResetsTheDelayForTheNextEnable() async throws {
-    let short = Duration.milliseconds(5)
-    let long = Duration.milliseconds(100)
-    var delays: [Duration] = []
-    let controller = PlaybackController(retryDelays: [short, long]) {
-        throw TransientFailure.unavailable
-    }
-    controller.onStateChange = { [weak controller] state in
-        if case .retrying(_, let delay) = state {
-            delays.append(delay)
-            if delays.count >= 2 { controller?.setEnabled(false) }
-        }
-    }
-
-    controller.setEnabled(true)
-    try await waitFor { controller.state == .disabled }
-    #expect(delays == [short, long])
-    controller.setEnabled(true)
-    try await waitFor { delays.count >= 3 }
-    #expect(delays == [short, long, short])
-    controller.setEnabled(false)
-}
-
-@Test @MainActor
 func timeoutRecoversAutomaticallyAndReleasesItsLateResult() async throws {
     let old = Session()
     let current = Session()
     var pending: CheckedContinuation<any PlaybackSession, any Error>?
     var acquisitions = 0
-    var retryDelays: [Duration] = []
+    var retried = false
     let controller = PlaybackController(acquisitionTimeout: .milliseconds(25),
-                                        retryDelays: [.milliseconds(5), .milliseconds(10)]) {
+                                        retryInterval: .milliseconds(5)) {
         acquisitions += 1
-        if acquisitions == 1 { throw TransientFailure.unavailable }
-        if acquisitions == 2 {
+        if acquisitions == 1 {
             return try await withCheckedThrowingContinuation { pending = $0 }
         }
         return current
     }
     controller.onStateChange = { state in
-        if case .retrying(_, let delay) = state { retryDelays.append(delay) }
+        if case .retrying = state { retried = true }
     }
     controller.setEnabled(true)
     try await waitFor { pending != nil }
     try await waitFor { controller.state == .enabled }
-    #expect(acquisitions == 3)
-    #expect(retryDelays == [.milliseconds(5), .milliseconds(10)])
+    #expect(acquisitions == 2)
+    #expect(retried)
     pending?.resume(returning: old)
     try await waitFor { old.releases == 1 }
     try await Task.sleep(for: .milliseconds(50))
     #expect(controller.state == .enabled)
+    #expect(acquisitions == 2)
     #expect(current.releases == 0)
     controller.setEnabled(false)
     #expect(current.releases == 1)
@@ -225,7 +181,7 @@ func disablingAStalledAcquisitionCancelsItsDeadline() async throws {
     var pending: CheckedContinuation<any PlaybackSession, any Error>?
     var acquisitions = 0
     let controller = PlaybackController(acquisitionTimeout: .milliseconds(25),
-                                        retryDelays: [.milliseconds(5)]) {
+                                        retryInterval: .milliseconds(5)) {
         acquisitions += 1
         return try await withCheckedThrowingContinuation { pending = $0 }
     }
@@ -243,19 +199,27 @@ func disablingAStalledAcquisitionCancelsItsDeadline() async throws {
 @Test @MainActor
 func permanentFailureDoesNotRetryUntilPlaybackIsReenabled() async throws {
     var acquisitions = 0
-    let controller = PlaybackController(retryDelays: [.milliseconds(10)]) {
+    let controller = PlaybackController(retryInterval: .milliseconds(10)) {
         acquisitions += 1
         throw PermanentFailure.unavailable
     }
     controller.setEnabled(true)
-    try await waitFor { controller.state == .failed("unavailable") }
+    try await waitFor {
+        if case .failed = controller.state { return true }
+        return false
+    }
     controller.setEnabled(true)
     try await Task.sleep(for: .milliseconds(30))
-    #expect(controller.state == .failed("unavailable"))
+    if case .failed = controller.state {} else {
+        Issue.record("Expected a permanent failure")
+    }
     #expect(acquisitions == 1)
     controller.setEnabled(false)
     controller.setEnabled(true)
-    try await waitFor { controller.state == .failed("unavailable") }
+    try await waitFor {
+        if case .failed = controller.state { return true }
+        return false
+    }
     #expect(acquisitions == 2)
     controller.setEnabled(false)
 }
@@ -264,7 +228,7 @@ func permanentFailureDoesNotRetryUntilPlaybackIsReenabled() async throws {
 func disablingFromStartingCallbackCancelsTheNotYetStartedRequest() async throws {
     var acquisitions = 0
     let controller = PlaybackController(acquisitionTimeout: .milliseconds(15),
-                                        retryDelays: [.milliseconds(5)]) {
+                                        retryInterval: .milliseconds(5)) {
         acquisitions += 1
         return Session()
     }
@@ -282,7 +246,7 @@ func reentrantDisableAndEnableFromRetryCallbackCancelsTheOldRetry() async throws
     let session = Session()
     var acquisitions = 0
     var restarted = false
-    let controller = PlaybackController(retryDelays: [.milliseconds(30)]) {
+    let controller = PlaybackController(retryInterval: .milliseconds(30)) {
         acquisitions += 1
         if acquisitions == 1 { throw TransientFailure.unavailable }
         return session

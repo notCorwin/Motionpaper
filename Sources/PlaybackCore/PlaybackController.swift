@@ -13,7 +13,7 @@ public final class PlaybackController {
         case disabled
         case starting
         case enabled
-        case retrying(String, after: Duration)
+        case retrying(String)
         case failed(String)
     }
 
@@ -24,31 +24,27 @@ public final class PlaybackController {
 
     private let acquire: @MainActor () async throws -> any PlaybackSession
     private let acquisitionTimeout: Duration
-    private let retryDelays: [Duration]
+    private let retryInterval: Duration
     private var isEnabled = false
     private var session: (any PlaybackSession)?
     private var request: Task<Void, Never>?
     private var timeout: Task<Void, Never>?
     private var retry: Task<Void, Never>?
-    private var nextRetryIndex = 0
     private var generation: UInt64 = 0
 
     public init(acquisitionTimeout: Duration = .seconds(10),
-                retryDelays: [Duration] = [.seconds(1), .seconds(2), .seconds(4),
-                                           .seconds(8), .seconds(16), .seconds(30)],
+                retryInterval: Duration = .seconds(3),
                 acquire: @escaping @MainActor () async throws -> any PlaybackSession) {
         precondition(acquisitionTimeout > .zero, "acquisitionTimeout must be positive")
-        precondition(!retryDelays.isEmpty && retryDelays.allSatisfy { $0 > .zero },
-                     "retryDelays must contain positive delays")
+        precondition(retryInterval > .zero, "retryInterval must be positive")
         self.acquisitionTimeout = acquisitionTimeout
-        self.retryDelays = retryDelays
+        self.retryInterval = retryInterval
         self.acquire = acquire
     }
 
     public func setEnabled(_ enabled: Bool) {
         guard isEnabled != enabled else { return }
         isEnabled = enabled
-        nextRetryIndex = 0
         if enabled {
             startAcquisition()
             return
@@ -89,7 +85,6 @@ public final class PlaybackController {
                 self.request = nil
                 let previousTimeout = self.timeout
                 self.timeout = nil
-                self.nextRetryIndex = 0
                 previousTimeout?.cancel()
                 guard self.generation == currentGeneration, self.isEnabled else { return }
                 self.state = .enabled
@@ -125,22 +120,22 @@ public final class PlaybackController {
             guard self.generation == timeoutGeneration, self.isEnabled else { return }
             self.scheduleRetry("开始播放超时。")
         }
+        // Keep recovery visible while the next acquisition is in flight.
+        if case .retrying = state { return }
         state = .starting
     }
 
     private func scheduleRetry(_ message: String) {
         generation &+= 1
         let currentGeneration = generation
-        let delay = retryDelays[nextRetryIndex]
-        if nextRetryIndex < retryDelays.count - 1 { nextRetryIndex += 1 }
-        retry = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: delay) }
+        retry = Task { @MainActor [weak self, retryInterval] in
+            do { try await Task.sleep(for: retryInterval) }
             catch { return }
             guard let self, self.generation == currentGeneration,
                   self.isEnabled, !Task.isCancelled else { return }
             self.retry = nil
             self.startAcquisition()
         }
-        state = .retrying(message, after: delay)
+        state = .retrying(message)
     }
 }
