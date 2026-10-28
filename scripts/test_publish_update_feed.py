@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+from unittest import mock
 
 
 spec = importlib.util.spec_from_file_location("publish_update_feed", Path(__file__).with_name("publish-update-feed.py"))
@@ -39,6 +40,9 @@ class FakeGitHub(feed.GitHub):
         self.catalog = {}
         self.calls = []
         self.upload_hook = None
+        self.before_delete = None
+        self.after_delete = None
+        self.delete_snapshots = []
 
     def add_release(self, item):
         self.catalog[item["id"]] = copy.deepcopy(item)
@@ -61,12 +65,28 @@ class FakeGitHub(feed.GitHub):
         item = next(item for item in self.catalog.values() if item["tag_name"] == tag)
         content = path.read_bytes()
         url_tag = "untagged-draft" if item["draft"] else tag
-        asset = {"name": "update.json", "state": "uploaded", "size": len(content),
+        asset_id = max((asset.get("id", 0) for release in self.catalog.values()
+                        for asset in release["assets"]), default=0) + 1
+        asset = {"id": asset_id, "name": "update.json", "state": "uploaded", "size": len(content),
                  "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
                  "browser_download_url": f"{BASE}/{url_tag}/update.json", "content": content.decode()}
         item["assets"] = [old for old in item["assets"] if old["name"] != "update.json"] + [asset]
         if self.upload_hook:
             self.upload_hook(self, item, asset)
+
+    def delete_asset(self, asset_id):
+        self.calls.append(("DELETE", asset_id))
+        for item in self.catalog.values():
+            asset = next((asset for asset in item["assets"] if asset.get("id") == asset_id), None)
+            if asset is not None:
+                self.delete_snapshots.append(copy.deepcopy(item["assets"]))
+                if self.before_delete:
+                    self.before_delete(self, item, asset)
+                item["assets"].remove(asset)
+                if self.after_delete:
+                    self.after_delete(self, item, asset)
+                return
+        raise feed.FeedError(f"asset {asset_id} not found")
 
 
 class UpdateFeedTests(unittest.TestCase):
@@ -84,6 +104,16 @@ class UpdateFeedTests(unittest.TestCase):
     def manifest(self, release_id=1):
         return next(item for item in self.github.catalog[release_id]["assets"] if item["name"] == "update.json")
 
+    def add_stale_assets(self):
+        old_dmg = copy.deepcopy(release("autobuild", "c" * 40)["assets"][0])
+        old_dmg["id"] = 30
+        notes = {"id": 31, "name": "old-notes.txt"}
+        self.github.catalog[1]["assets"] += [old_dmg, notes]
+        return {old_dmg["name"], notes["name"]}
+
+    def asset_names(self, release_id=1):
+        return {asset["name"] for asset in self.github.catalog[release_id]["assets"]}
+
     def test_only_current_channel_is_published_and_same_content_is_reused(self):
         result = self.publish()
         self.assertEqual(set(result["feed"]), {"autobuild"})
@@ -92,10 +122,169 @@ class UpdateFeedTests(unittest.TestCase):
         self.github.calls.clear()
         result = self.publish()
         self.assertFalse(result["changed"])
+        self.assertEqual(result["removed"], [])
         self.assertFalse(any(method == "UPLOAD" for method, _ in self.github.calls))
+        self.assertFalse(any(method == "DELETE" for method, _ in self.github.calls))
         self.assertFalse(any(route == "releases/2" for _, route in self.github.calls))
         self.assertFalse(any("git/trees" in route or "git/commits" in route or "refs/heads" in route
-                             for _, route in self.github.calls))
+                             for method, route in self.github.calls if method == "GET"))
+
+    def test_autobuild_removes_old_assets_only_after_verifying_new_manifest(self):
+        stale = self.add_stale_assets()
+        result = self.publish()
+        current_dmg = f"Motionpaper-{'a' * 12}.dmg"
+        self.assertTrue(result["changed"])
+        self.assertCountEqual(result["removed"], stale)
+        self.assertEqual(self.asset_names(), {current_dmg, "update.json"})
+        self.assertEqual(len(self.github.catalog[1]["assets"]), 2)
+
+        upload = next(i for i, (method, _) in enumerate(self.github.calls) if method == "UPLOAD")
+        delete = next(i for i, (method, _) in enumerate(self.github.calls) if method == "DELETE")
+        self.assertTrue(any(call == ("GET", "releases/1") for call in self.github.calls[upload + 1:delete]))
+        for assets in self.github.delete_snapshots:
+            manifest = next(asset for asset in assets if asset["name"] == "update.json")
+            content = manifest["content"].encode()
+            self.assertEqual(json.loads(content), result["feed"])
+            self.assertEqual(manifest["size"], len(content))
+            self.assertEqual(manifest["digest"], "sha256:" + hashlib.sha256(content).hexdigest())
+            self.assertEqual(manifest["state"], "uploaded")
+            self.assertIn(current_dmg, {asset["name"] for asset in assets})
+
+        self.github.calls.clear()
+        again = self.publish()
+        self.assertFalse(again["changed"])
+        self.assertEqual(again["removed"], [])
+        self.assertFalse(any(method in ("UPLOAD", "DELETE") for method, _ in self.github.calls))
+
+    def test_unchanged_manifest_still_cleans_stale_assets(self):
+        self.publish()
+        stale = self.add_stale_assets()
+        self.github.calls.clear()
+        result = self.publish()
+        self.assertFalse(result["changed"])
+        self.assertCountEqual(result["removed"], stale)
+        self.assertEqual(self.asset_names(), {f"Motionpaper-{'a' * 12}.dmg", "update.json"})
+        self.assertFalse(any(method == "UPLOAD" for method, _ in self.github.calls))
+
+    def test_delete_failure_preserves_current_assets_and_retry_finishes_cleanup(self):
+        stale = self.add_stale_assets()
+
+        def fail_second_delete(github, _, __):
+            if len([call for call in github.calls if call[0] == "DELETE"]) == 2:
+                raise feed.FeedError("injected delete failure")
+
+        self.github.before_delete = fail_second_delete
+        with self.assertRaisesRegex(feed.FeedError, "injected delete failure"):
+            self.publish()
+        protected = {f"Motionpaper-{'a' * 12}.dmg", "update.json"}
+        self.assertTrue(protected <= self.asset_names())
+        remaining = self.asset_names() - protected
+        self.assertEqual(len(remaining), 1)
+        self.assertTrue(remaining <= stale)
+        self.assertEqual(json.loads(self.manifest()["content"])["autobuild"]["commit"], "a" * 40)
+
+        self.github.before_delete = None
+        self.github.calls.clear()
+        result = self.publish()
+        self.assertFalse(result["changed"])
+        self.assertEqual(set(result["removed"]), remaining)
+        self.assertEqual(self.asset_names(), protected)
+        self.assertFalse(any(method == "UPLOAD" for method, _ in self.github.calls))
+
+    def test_branch_or_tag_change_after_manifest_verification_prevents_cleanup(self):
+        for changed in ("branch", "tag"):
+            with self.subTest(changed=changed):
+                self.setUp()
+                self.publish()
+                self.add_stale_assets()
+                before = copy.deepcopy(self.github.catalog[1]["assets"])
+                self.github.calls.clear()
+                verify = feed.verify_manifest
+                advanced = False
+
+                def advance_after_verification(*args, **kwargs):
+                    nonlocal advanced
+                    verify(*args, **kwargs)
+                    if not advanced:
+                        advanced = True
+                        if changed == "branch":
+                            self.github.default = "f" * 40
+                        else:
+                            self.github.tags["Autobuild"]["sha"] = "f" * 40
+
+                with mock.patch.object(feed, "verify_manifest", side_effect=advance_after_verification):
+                    with self.assertRaises(feed.FeedError):
+                        self.publish()
+                self.assertTrue(advanced)
+                self.assertEqual(self.github.catalog[1]["assets"], before)
+                self.assertFalse(any(method == "DELETE" for method, _ in self.github.calls))
+
+    def test_cleanup_does_not_delete_an_id_now_used_by_a_current_asset(self):
+        for name in (f"Motionpaper-{'a' * 12}.dmg", "update.json"):
+            with self.subTest(name=name):
+                self.setUp()
+                self.publish()
+                assets = self.github.catalog[1]["assets"]
+                original = next(asset for asset in assets if asset["name"] == name)
+                replacement = copy.deepcopy(original)
+                replacement.update(id=30, name="replacement.tmp",
+                                   browser_download_url=f"{BASE}/Autobuild/replacement.tmp")
+                assets.append(replacement)
+                self.github.calls.clear()
+                verify = feed.verify_manifest
+                replaced = False
+
+                def replace_after_verification(*args, **kwargs):
+                    nonlocal replaced
+                    verify(*args, **kwargs)
+                    if not replaced:
+                        replaced = True
+                        assets.remove(original)
+                        replacement["name"] = name
+                        replacement["browser_download_url"] = original["browser_download_url"]
+
+                with mock.patch.object(feed, "verify_manifest", side_effect=replace_after_verification):
+                    with self.assertRaises(feed.FeedError):
+                        self.publish()
+                self.assertTrue(replaced)
+                self.assertEqual(next(asset for asset in assets if asset["name"] == name)["id"], 30)
+                self.assertEqual(self.asset_names(), {f"Motionpaper-{'a' * 12}.dmg", "update.json"})
+                self.assertFalse(any(method == "DELETE" and asset_id == 30
+                                     for method, asset_id in self.github.calls))
+
+    def test_each_deletion_rechecks_branch_tag_release_and_protected_assets(self):
+        for changed in ("branch", "tag", "release", "dmg", "manifest"):
+            with self.subTest(changed=changed):
+                self.setUp()
+                self.publish()
+                stale = self.add_stale_assets()
+                self.github.calls.clear()
+                protected = {f"Motionpaper-{'a' * 12}.dmg", "update.json"}
+
+                def change_after_first_delete(github, item, _):
+                    if len([call for call in github.calls if call[0] == "DELETE"]) != 1:
+                        return
+                    if changed == "branch":
+                        github.default = "f" * 40
+                    elif changed == "tag":
+                        github.tags["Autobuild"]["sha"] = "f" * 40
+                    elif changed == "release":
+                        item["id"] = 999
+                    elif changed == "dmg":
+                        current = next(asset for asset in item["assets"] if asset["name"] == f"Motionpaper-{'a' * 12}.dmg")
+                        current["digest"] = "sha256:" + "b" * 64
+                    else:
+                        manifest = next(asset for asset in item["assets"] if asset["name"] == "update.json")
+                        manifest["digest"] = "sha256:" + "b" * 64
+
+                self.github.after_delete = change_after_first_delete
+                with self.assertRaises(feed.FeedError):
+                    self.publish()
+                self.assertEqual(len([call for call in self.github.calls if call[0] == "DELETE"]), 1)
+                self.assertTrue(protected <= self.asset_names())
+                remaining = self.asset_names() - protected
+                self.assertEqual(len(remaining), 1)
+                self.assertTrue(remaining <= stale)
 
     def test_moving_tag_uses_actual_full_commit_not_release_target(self):
         new = "c" * 40
@@ -127,31 +316,59 @@ class UpdateFeedTests(unittest.TestCase):
 
     def test_existing_published_stable_can_replace_old_manifest_without_touching_dmg(self):
         old_dmg = copy.deepcopy(self.github.catalog[2]["assets"][0])
+        notes = {"id": 21, "name": "notes.txt"}
+        self.github.catalog[2]["assets"].append(notes)
         self.github.catalog[2]["assets"].append({"name": "update.json", "size": 1, "digest": "sha256:" + "0" * 64})
         result = self.publish("stable")
         self.assertTrue(result["changed"])
+        self.assertEqual(result["removed"], [])
         self.assertEqual(self.github.catalog[2]["assets"][0], old_dmg)
+        self.assertIn(notes, self.github.catalog[2]["assets"])
         self.assertEqual(set(json.loads(self.manifest(2)["content"])), {"stable"})
+        self.assertFalse(any(method == "DELETE" for method, _ in self.github.calls))
 
     def test_verify_only_never_uploads_and_rejects_missing_or_wrong_manifest(self):
         with self.assertRaisesRegex(feed.FeedError, "missing update.json"):
             self.publish(verify_only=True)
         self.publish()
-        self.github.catalog[1]["assets"][-1]["size"] += 1
+        self.add_stale_assets()
+        before = copy.deepcopy(self.github.catalog[1]["assets"])
+        self.github.calls.clear()
+        result = self.publish(verify_only=True)
+        self.assertFalse(result["changed"])
+        self.assertEqual(result["removed"], [])
+        self.assertEqual(self.github.catalog[1]["assets"], before)
+        self.assertFalse(any(method in ("UPLOAD", "DELETE") for method, _ in self.github.calls))
+        self.manifest()["size"] += 1
         self.github.calls.clear()
         with self.assertRaisesRegex(feed.FeedError, "does not match"):
             self.publish(verify_only=True)
-        self.assertFalse(any(method == "UPLOAD" for method, _ in self.github.calls))
+        self.assertFalse(any(method in ("UPLOAD", "DELETE") for method, _ in self.github.calls))
+
+    def test_manifest_upload_failure_never_deletes_old_assets(self):
+        stale = self.add_stale_assets()
+
+        def fail_upload(*_):
+            raise feed.FeedError("injected upload failure")
+
+        self.github.upload_hook = fail_upload
+        with self.assertRaisesRegex(feed.FeedError, "injected upload failure"):
+            self.publish()
+        self.assertTrue(stale <= self.asset_names())
+        self.assertFalse(any(method == "DELETE" for method, _ in self.github.calls))
 
     def test_wrong_uploaded_manifest_metadata_is_rejected(self):
         for field, value in (("size", 1), ("digest", "sha256:" + "b" * 64),
                              ("state", "starter"), ("browser_download_url", "https://example.com/update.json")):
             with self.subTest(field=field):
                 self.setUp()
+                stale = self.add_stale_assets()
                 self.github.upload_hook = lambda _, item, asset: asset.__setitem__(field, value)
                 with self.assertRaises(feed.FeedError):
                     self.publish()
                 self.assertEqual(len([call for call in self.github.calls if call[0] == "UPLOAD"]), 1)
+                self.assertTrue(stale <= self.asset_names())
+                self.assertFalse(any(method == "DELETE" for method, _ in self.github.calls))
 
     def test_same_content_with_invalid_state_or_url_is_not_silently_replaced(self):
         for field, value in (("state", "starter"), ("browser_download_url", "https://example.com/update.json")):

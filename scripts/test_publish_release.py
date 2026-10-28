@@ -118,6 +118,13 @@ def api():
                    'published_at': None, 'assets': []}
         s['releases'].append(release)
         out(release)
+    elif method == 'DELETE' and route.startswith('releases/assets/'):
+        asset_id = route[len('releases/assets/'):]
+        release = next((r for r in s['releases'] if any(str(item['id']) == asset_id for item in r['assets'])), None)
+        if release is None: fail('missing asset', 404)
+        s.setdefault('delete_snapshots', []).append(copy.deepcopy(release))
+        if s.pop('fail_delete', False): fail('injected asset deletion failure', 500)
+        release['assets'] = [item for item in release['assets'] if str(item['id']) != asset_id]
     elif route.startswith('releases/') and '/assets/' not in route:
         release = find_release(release_id=route[len('releases/'):])
         if not release: fail('missing release', 404)
@@ -243,6 +250,12 @@ def uploads(calls, name=None):
             and (name is None or Path(call[3]).name == name)]
 
 
+def deletions(calls):
+    prefix = f"repos/{REPOSITORY}/releases/assets/"
+    return [call for call in calls if call[:1] == ["api"] and "DELETE" in call
+            and any(part.startswith(prefix) for part in call)]
+
+
 class PublishReleaseTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -332,13 +345,16 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertIn("Reusing complete", second.stdout)
         self.assertEqual(read_feed(state), document)
         self.assertFalse(uploads(state["calls"][offset:]))
+        self.assertFalse(deletions(state["calls"][offset:]))
         self.assertFalse(any(call[:2] == ["release", "download"] for call in state["calls"][offset:]))
 
-    def test_two_commits_keep_old_dmg_and_publish_in_order(self):
+    def test_two_commits_publish_in_order_and_remove_old_assets(self):
         first_commit, second_commit = "a" * 40, "b" * 40
         first, state = self.publish(state_for(first_commit), first_commit)
         self.assert_success(first)
-        old_feed = read_feed(state)
+        notes = asset("Autobuild", "old-notes.txt", b"old notes")
+        notes["id"] = max(item["id"] for item in state["releases"][0]["assets"]) + 1
+        state["releases"][0]["assets"].append(notes)
         state["branches"]["main"] = second_commit
         offset = len(state["calls"])
         result, state = self.publish(state, second_commit)
@@ -350,19 +366,34 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertEqual(release["target_commitish"], first_commit)
         self.assertIn(f"commit `{second_commit[:7]}` on the main branch", release["body"])
         self.assertEqual({item["name"] for item in release["assets"]},
-                         {f"Motionpaper-{first_commit[:12]}.dmg", f"Motionpaper-{second_commit[:12]}.dmg", "update.json"})
+                         {f"Motionpaper-{second_commit[:12]}.dmg", "update.json"})
+        self.assertEqual(len(release["assets"]), 2)
         self.assertEqual(read_feed(state)["autobuild"]["commit"], second_commit)
-        self.assertTrue(any(item["browser_download_url"] == old_feed["autobuild"]["downloadURL"] for item in release["assets"]))
         calls = state["calls"][offset:]
         dmg_upload = next(i for i, call in enumerate(calls) if call in uploads(calls, f"Motionpaper-{second_commit[:12]}.dmg"))
         tag_move = next(i for i, call in enumerate(calls) if f"repos/{REPOSITORY}/git/refs/tags/Autobuild" in call and "PATCH" in call)
         release_update = next(i for i, call in enumerate(calls) if f"repos/{REPOSITORY}/releases/1" in call and "PATCH" in call)
         json_upload = next(i for i, call in enumerate(calls) if call in uploads(calls, "update.json"))
+        first_delete = next(i for i, call in enumerate(calls) if call in deletions(calls))
         self.assertLess(dmg_upload, tag_move)
         self.assertLess(tag_move, release_update)
         self.assertLess(release_update, json_upload)
+        self.assertLess(json_upload, first_delete)
         self.assertIn("--clobber", calls[json_upload])
-        self.assertFalse(any("DELETE" in call for call in calls))
+        self.assertEqual(len(deletions(calls)), 2)
+        for snapshot in state["delete_snapshots"]:
+            manifest = next(item for item in snapshot["assets"] if item["name"] == "update.json")
+            content = base64.b64decode(manifest["content"])
+            self.assertEqual(json.loads(content)["autobuild"]["commit"], second_commit)
+            self.assertEqual(manifest["size"], len(content))
+            self.assertEqual(manifest["digest"], "sha256:" + hashlib.sha256(content).hexdigest())
+            self.assertEqual(manifest["state"], "uploaded")
+
+        offset = len(state["calls"])
+        result, state = self.publish(state, second_commit)
+        self.assert_success(result)
+        self.assertFalse(uploads(state["calls"][offset:]))
+        self.assertFalse(deletions(state["calls"][offset:]))
 
     def test_failed_dmg_upload_keeps_old_feed_tag_and_resumes(self):
         for when in ("before", "after"):
@@ -373,15 +404,19 @@ class PublishReleaseTests(unittest.TestCase):
                 old_feed = read_feed(state)
                 state["branches"]["main"] = new
                 state["upload_fail"] = {"kind": "dmg", "when": when}
+                offset = len(state["calls"])
                 result, state = self.publish(state, new)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("Published autobuild release", result.stdout)
                 self.assertEqual(read_feed(state), old_feed)
                 self.assertEqual(state["tags"]["Autobuild"]["sha"], old)
                 self.assertIn(f"Motionpaper-{old[:12]}.dmg", [item["name"] for item in state["releases"][0]["assets"]])
+                self.assertFalse(deletions(state["calls"][offset:]))
                 result, state = self.publish(state, new, content=b"different retry")
                 self.assert_success(result)
                 self.assertEqual(read_feed(state)["autobuild"]["commit"], new)
+                self.assertEqual({item["name"] for item in state["releases"][0]["assets"]},
+                                 {f"Motionpaper-{new[:12]}.dmg", "update.json"})
                 if when == "after":
                     self.assertEqual(read_feed(state)["autobuild"]["sha256"], hashlib.sha256(b"new package").hexdigest())
 
@@ -394,10 +429,12 @@ class PublishReleaseTests(unittest.TestCase):
                 old_feed = read_feed(state)
                 state["branches"]["main"] = new
                 state["upload_fail"] = {"kind": "json", "when": when}
+                offset = len(state["calls"])
                 result, state = self.publish(state, new)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(state["tags"]["Autobuild"]["sha"], new)
                 self.assertIn(f"Motionpaper-{old[:12]}.dmg", [item["name"] for item in state["releases"][0]["assets"]])
+                self.assertFalse(deletions(state["calls"][offset:]))
                 if when == "before": self.assertEqual(read_feed(state), old_feed)
                 if when == "after_delete": self.assertIsNone(read_feed(state))
                 if when == "after": self.assertEqual(read_feed(state)["autobuild"]["commit"], new)
@@ -405,8 +442,31 @@ class PublishReleaseTests(unittest.TestCase):
                 result, state = self.publish(state, new, content=b"different retry")
                 self.assert_success(result)
                 self.assertEqual(read_feed(state)["autobuild"]["commit"], new)
+                self.assertEqual({item["name"] for item in state["releases"][0]["assets"]},
+                                 {f"Motionpaper-{new[:12]}.dmg", "update.json"})
                 self.assertFalse(uploads(state["calls"][offset:], f"Motionpaper-{new[:12]}.dmg"))
                 if when == "after": self.assertFalse(uploads(state["calls"][offset:], "update.json"))
+
+    def test_failed_asset_delete_keeps_current_feed_and_retries_without_upload(self):
+        old, new = "a" * 40, "b" * 40
+        result, state = self.publish(state_for(old), old)
+        self.assert_success(result)
+        state["branches"]["main"] = new
+        state["fail_delete"] = True
+        result, state = self.publish(state, new)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("injected asset deletion failure", result.stderr)
+        self.assertEqual(read_feed(state)["autobuild"]["commit"], new)
+        self.assertEqual({item["name"] for item in state["releases"][0]["assets"]},
+                         {f"Motionpaper-{old[:12]}.dmg", f"Motionpaper-{new[:12]}.dmg", "update.json"})
+
+        offset = len(state["calls"])
+        result, state = self.publish(state, new)
+        self.assert_success(result)
+        self.assertEqual({item["name"] for item in state["releases"][0]["assets"]},
+                         {f"Motionpaper-{new[:12]}.dmg", "update.json"})
+        self.assertFalse(uploads(state["calls"][offset:]))
+        self.assertEqual(len(deletions(state["calls"][offset:])), 1)
 
     def test_first_autobuild_draft_resumes_an_interrupted_upload(self):
         commit = "a" * 40
@@ -486,6 +546,7 @@ class PublishReleaseTests(unittest.TestCase):
                          {"Motionpaper-v1.2.3.dmg", "notes.txt", "update.json"})
         self.assertTrue(any(call[:2] == ["release", "download"] for call in state["calls"]))
         self.assertEqual(len(uploads(state["calls"])), 1)
+        self.assertFalse(deletions(state["calls"]))
 
     def test_stable_draft_manifest_failure_does_not_publish_and_can_resume(self):
         commit = "a" * 40
@@ -685,7 +746,7 @@ class PublishReleaseTests(unittest.TestCase):
                 self.assertEqual(state["tags"]["Autobuild"]["sha"], c2)
                 self.assertEqual(read_feed(state)["autobuild"]["commit"], c2)
                 self.assertEqual({item["name"] for item in state["releases"][0]["assets"]},
-                                 {*(f"Motionpaper-{c[:12]}.dmg" for c in (c0, c1, c2)), "update.json"})
+                                 {f"Motionpaper-{c2[:12]}.dmg", "update.json"})
 
     def test_tag_changed_during_upload_is_rejected_even_if_it_is_new_commit(self):
         old, new = "a" * 40, "b" * 40

@@ -70,6 +70,17 @@ class GitHub:
             detail = result.stderr.strip() or result.stdout.strip()
             raise FeedError(f"GitHub upload update.json: {detail}")
 
+    def delete_asset(self, asset_id):
+        if type(asset_id) is not int or asset_id <= 0:
+            raise FeedError("obsolete asset has an invalid id")
+        result = subprocess.run(
+            ["gh", "api", "--method", "DELETE", self.prefix + f"releases/assets/{asset_id}"],
+            text=True, capture_output=True, check=False,
+        )
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise FeedError(f"GitHub delete obsolete asset {asset_id}: {detail}")
+
 
 def unique_object(pairs):
     result = {}
@@ -237,22 +248,51 @@ def publish(github, repository, channel, commit, branch, expected, *, verify_onl
     digest = "sha256:" + hashlib.sha256(content).hexdigest()
     asset = manifest_asset(current)
     same = asset is not None and asset.get("size") == len(content) and asset.get("digest") == digest
-    if verify_only or same:
-        verify_manifest(current, repository, content)
-        return {"feed": document, "changed": False}
+    changed = not verify_only and not same
+    if changed:
+        check_branch()
+        checked_candidate(github, repository, channel, expected, commit)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "update.json"
+            path.write_bytes(content)
+            github.upload(current["tag_name"], path)
+        check_branch()
+        final_entry, current = checked_candidate(github, repository, channel, expected, commit)
+        if final_entry != entry:
+            raise FeedError("the verified release changed during the feed update")
+    verify_manifest(current, repository, content)
 
-    check_branch()
-    checked_candidate(github, repository, channel, expected, commit)
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "update.json"
-        path.write_bytes(content)
-        github.upload(current["tag_name"], path)
-    check_branch()
-    final_entry, final = checked_candidate(github, repository, channel, expected, commit)
-    if final_entry != entry:
-        raise FeedError("the verified release changed during the feed update")
-    verify_manifest(final, repository, content)
-    return {"feed": document, "changed": True}
+    removed = []
+    if channel == "autobuild" and not verify_only:
+        keep = {entry["downloadURL"].rsplit("/", 1)[-1], "update.json"}
+        obsolete = [asset for asset in current["assets"] if asset.get("name") not in keep]
+
+        def verified_current():
+            check_branch()
+            latest_entry, latest = checked_candidate(github, repository, channel, expected, commit)
+            if latest_entry != entry:
+                raise FeedError("the verified release changed during asset cleanup")
+            verify_manifest(latest, repository, content)
+            return latest
+
+        for asset in obsolete:
+            latest = verified_current()
+            asset_id = asset.get("id")
+            if type(asset_id) is not int or asset_id <= 0:
+                raise FeedError("obsolete asset has an invalid id")
+            # Asset IDs stay unique across uploads; never delete a currently referenced file.
+            if any(item.get("id") == asset_id and item.get("name") in keep for item in latest["assets"]):
+                raise FeedError("obsolete asset id conflicts with a current asset")
+            stale = next((item for item in latest["assets"]
+                          if item.get("id") == asset_id and item.get("name") not in keep), None)
+            if stale is not None:
+                github.delete_asset(asset_id)
+                removed.append(stale["name"])
+        if obsolete:
+            final = verified_current()
+            if {asset.get("name") for asset in final["assets"]} != keep:
+                raise FeedError("Autobuild still contains obsolete assets after cleanup")
+    return {"feed": document, "changed": changed, "removed": removed}
 
 
 def main():
@@ -276,6 +316,8 @@ def main():
     result = publish(GitHub(repository), repository, channel, commit, branch, expected, verify_only=args.verify_only)
     args.result.write_text(json.dumps(result) + "\n", encoding="utf-8")
     print("Published release update.json." if result["changed"] else "Release update.json is verified and unchanged.")
+    if result["removed"]:
+        print("Removed obsolete assets: " + ", ".join(result["removed"]))
 
 
 if __name__ == "__main__":
