@@ -147,75 +147,19 @@ struct UpdateServiceTests {
     }
 
     @Test
-    func eachChannelsValidatorAndCachedContentStayIndependent() async throws {
-        let fixture = Fixture(responses: [
-            .init(body: try feedData(autobuild: entry(), stable: nil), headers: ["ETag": "\"auto\""]),
-            .init(body: try feedData(autobuild: nil, stable: entry(version: "1.2.3")), headers: ["ETag": "\"stable\""]),
-            .init(status: 304), .init(status: 304),
-        ])
-        defer { fixture.close() }
-        let service = fixture.service()
-        #expect(try await service.check()?.commit == commit)
-        #expect(try await service.check(channel: .stable)?.version == ReleaseVersion("1.2.3"))
-        #expect(try await service.check()?.commit == commit)
-        #expect(try await service.check(channel: .stable)?.version == ReleaseVersion("1.2.3"))
-        #expect(FeedProtocol.requests.map { $0.value(forHTTPHeaderField: "If-None-Match") }
-                == [nil, nil, "\"auto\"", "\"stable\""])
-    }
-
-    @Test
-    func checksRevalidateUnchangedFeedsAndReplaceChangedContent() async throws {
+    func checksFetchFreshFeedsWithoutValidators() async throws {
         let fixture = Fixture(responses: [
             .init(body: try feedData(), headers: ["ETag": "\"first\""]),
-            .init(status: 304),
-            .init(body: try feedData(autobuild: entry(commit: nextCommit)), headers: ["ETag": "\"second\""]),
+            .init(body: try feedData(autobuild: entry(commit: nextCommit))),
             .init(status: 304),
         ])
         defer { fixture.close() }
         let service = fixture.service(currentCommit: commit)
         #expect(try await service.check() == nil)
-        #expect(try await service.check() == nil)
         #expect(try await service.check()?.commit == nextCommit)
-        #expect(try await service.check()?.commit == nextCommit)
-        let requests = FeedProtocol.requests
-        #expect(requests.map { $0.value(forHTTPHeaderField: "If-None-Match") } == [nil, "\"first\"", "\"first\"", "\"second\""])
-        #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "Accept") == "application/json" })
-        #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "Cache-Control") == "no-cache" })
-        #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "X-GitHub-Api-Version") == nil })
-    }
-
-    @Test
-    func invalidResponsesNeverReplaceValidatedCacheOrHideFailures() async throws {
-        let fixture = Fixture(responses: [
-            .init(body: try feedData(), headers: ["ETag": "\"valid\""]),
-            .init(body: Data("invalid".utf8), headers: ["ETag": "\"invalid\""]),
-            .init(status: 403), .init(status: 304),
-        ])
-        defer { fixture.close() }
-        let service = fixture.service()
-        #expect(try await service.check()?.commit == commit)
         await #expect(throws: UpdateError.self) { try await service.check() }
-        await #expect(throws: UpdateError.self) { try await service.check() }
-        #expect(try await service.check()?.commit == commit)
-        #expect(FeedProtocol.requests.dropFirst().allSatisfy { $0.value(forHTTPHeaderField: "If-None-Match") == "\"valid\"" })
-    }
-
-    @Test
-    func mismatched304CannotBindOldContentToANewValidator() async throws {
-        let fixture = Fixture(responses: [
-            .init(body: try feedData(), headers: ["ETag": "\"first\""]),
-            .init(status: 304, headers: ["ETag": "\"second\""]),
-            .init(body: try feedData(autobuild: entry(commit: nextCommit)), headers: ["ETag": "\"second\""]),
-            .init(status: 304, headers: ["ETag": "W/\"second\""]),
-        ])
-        defer { fixture.close() }
-        let service = fixture.service(currentCommit: commit)
-        #expect(try await service.check() == nil)
-        await #expect(throws: UpdateError.self) { try await service.check() }
-        #expect(try await service.check()?.commit == nextCommit)
-        #expect(try await service.check()?.commit == nextCommit)
-        #expect(FeedProtocol.requests.map { $0.value(forHTTPHeaderField: "If-None-Match") }
-                == [nil, "\"first\"", "\"first\"", "\"second\""])
+        #expect(FeedProtocol.requests.allSatisfy { $0.value(forHTTPHeaderField: "If-None-Match") == nil })
+        #expect(FeedProtocol.requests.allSatisfy { $0.value(forHTTPHeaderField: "Cache-Control") == "no-cache, no-store" })
     }
 
     @Test(arguments: [false, true])
@@ -226,7 +170,7 @@ struct UpdateServiceTests {
         let manifest = try #require(UpdateFeed(data: feedData(), url: feedURL).autobuild)
         let request = Task {
             withUnsafeCurrentTask { $0?.cancel() }
-            if downloading { _ = try await service.download(manifest) }
+            if downloading { _ = try await service.withDownloadedImage(manifest) { _ in true } }
             else { _ = try await service.check() }
         }
         await #expect(throws: CancellationError.self) { try await request.value }

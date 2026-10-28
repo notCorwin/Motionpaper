@@ -61,10 +61,14 @@ final class UpdateController {
     func start() {
         guard !stopping, maintenance == nil else { return }
         refreshInstallationFailure()
-        maintenance = Task { [weak self] in
+        maintenance = Task { [weak self, service] in
             do { try await UpdateInstaller.removeStaleInstallations(application: Bundle.main.bundleURL) }
             catch {
                 self?.logger.error("Stale update cleanup failed: \(error.localizedDescription, privacy: .public)")
+            }
+            do { try await service?.removeStaleDownloads() }
+            catch {
+                self?.logger.error("Stale download cleanup failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -168,6 +172,31 @@ final class UpdateController {
         }
     }
 
+    // A rolling Autobuild can replace its asset after the user checked for updates.
+    // Refresh once on a missing image, and only follow a different asset URL.
+    func withUpdateImage<Value: Sendable>(
+        _ manifest: UpdateManifest, using service: UpdateService,
+        operation: @escaping @Sendable (URL, UpdateManifest) async throws -> Value
+    ) async throws -> Value? {
+        func attempt(_ target: UpdateManifest) async throws -> Result<Value, any Error> {
+            try await service.withDownloadedImage(target) { image in
+                do { return .success(try await operation(image, target)) }
+                catch { return .failure(error) }
+            }
+        }
+
+        let result: Result<Value, any Error>
+        do {
+            result = try await attempt(manifest)
+        } catch UpdateError.httpStatus(404) where channel == .autobuild && manifest.version == nil {
+            guard let latest = try await service.check(channel: .autobuild) else { return nil }
+            guard latest.downloadURL != manifest.downloadURL else { throw UpdateError.httpStatus(404) }
+            state = .downloading(latest)
+            result = try await attempt(latest)
+        }
+        return try result.get()
+    }
+
     private func install(_ manifest: UpdateManifest, using service: UpdateService) {
         guard !stopping, !state.isBusy, operation == nil else { return }
         state = .downloading(manifest)
@@ -177,11 +206,18 @@ final class UpdateController {
                 try Task.checkCancellation()
                 try UpdateInstallationFailure.clear(application: Bundle.main.bundleURL)
                 try UpdateInstaller.validateDestination(Bundle.main.bundleURL)
-                let file = try await service.download(manifest)
-                try Task.checkCancellation()
-                state = .installing
-                let update = try await UpdateInstaller.prepare(image: file, manifest: manifest,
-                                                               application: Bundle.main.bundleURL)
+                let update = try await withUpdateImage(manifest, using: service) { [weak self] image, target in
+                    try Task.checkCancellation()
+                    await MainActor.run { self?.state = .installing }
+                    return try await UpdateInstaller.prepare(image: image, manifest: target,
+                                                             application: Bundle.main.bundleURL)
+                }
+                guard let update else {
+                    operation = nil
+                    guard !Task.isCancelled, !stopping else { return }
+                    state = .upToDate
+                    return
+                }
                 var handedOff = false
                 defer { if !handedOff { update.discard() } }
                 try await update.startInstaller(parentPID: ProcessInfo.processInfo.processIdentifier)

@@ -9,18 +9,34 @@ public actor UpdateService {
     private let channel: UpdateChannel
     private let session: URLSession
     private let directory: URL
-    private var checkRequests: [UpdateChannel: Task<FeedResponse, any Error>] = [:]
-    private var cachedFeeds: [UpdateChannel: FeedResponse] = [:]
-    private var downloads: [String: Task<URL, any Error>] = [:]
+    private var checkRequests: [UpdateChannel: Task<UpdateFeed, any Error>] = [:]
+    private var downloads: [DownloadKey: DownloadRequest] = [:]
+
+    private struct DownloadKey: Hashable {
+        let url: URL
+        let sha256: String
+        let size: Int64
+    }
+
+    private struct DownloadRequest {
+        let task: Task<TemporaryImage, any Error>
+        var users: Int
+    }
 
     public init(feedURL: URL, currentCommit: String, currentVersion: String? = nil,
-                channel: UpdateChannel = .autobuild, directory: URL, session: URLSession = .shared) {
+                channel: UpdateChannel = .autobuild, directory: URL, session: URLSession? = nil) {
         self.feedURL = feedURL
         self.currentCommit = currentCommit
         self.currentVersion = currentVersion
         self.channel = channel
         self.directory = directory
-        self.session = session
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.urlCache = nil
+            self.session = URLSession(configuration: configuration)
+        }
     }
 
     public func check(channel requestedChannel: UpdateChannel? = nil) async throws -> UpdateManifest? {
@@ -51,52 +67,64 @@ public actor UpdateService {
         }
     }
 
-    public func download(_ manifest: UpdateManifest) async throws -> URL {
+    /// Shares an in-flight download, retaining its temporary image until all users finish.
+    public func withDownloadedImage<Value: Sendable>(
+        _ manifest: UpdateManifest, operation: @Sendable (URL) async throws -> Value
+    ) async throws -> Value {
         try Task.checkCancellation()
-        if let download = downloads[manifest.sha256] {
-            let file = try await download.value
-            try Task.checkCancellation()
-            return file
-        }
-        let download = Task { [session, directory] in
-            let manager = FileManager.default
-            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
-            let destination = directory.appendingPathComponent("\(manifest.commit)-\(manifest.sha256).dmg")
-            if manager.fileExists(atPath: destination.path) {
-                if try Self.verify(destination, manifest: manifest) { return destination }
-                try manager.removeItem(at: destination)
-            }
-            return try await Self.withNetworkRetries {
-                let request = URLRequest(url: manifest.downloadURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 300)
-                let validator = DownloadValidator(size: manifest.size)
-                let temporary: URL
-                let response: URLResponse
-                do {
-                    (temporary, response) = try await session.download(for: request, delegate: validator)
-                } catch {
-                    // A rejected response cancels URLSession, but must retain its HTTP or integrity error.
+        let key = DownloadKey(url: manifest.downloadURL, sha256: manifest.sha256, size: manifest.size)
+        let task: Task<TemporaryImage, any Error>
+        if var existing = downloads[key] {
+            existing.users += 1
+            downloads[key] = existing
+            task = existing.task
+        } else {
+            task = Task { [session, directory] in
+                let image = try TemporaryImage(directory: directory)
+                return try await Self.withNetworkRetries {
+                    var request = URLRequest(url: manifest.downloadURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 300)
+                    request.setValue("no-cache, no-store", forHTTPHeaderField: "Cache-Control")
+                    let validator = DownloadValidator(size: manifest.size)
+                    let temporary: URL
+                    let response: URLResponse
+                    do {
+                        (temporary, response) = try await session.download(for: request, delegate: validator)
+                    } catch {
+                        try validator.validate()
+                        throw error
+                    }
+                    defer { try? FileManager.default.removeItem(at: temporary) }
                     try validator.validate()
-                    throw error
+                    try Self.validate(response)
+                    guard try Self.verify(temporary, manifest: manifest) else { throw UpdateError.checksumMismatch }
+                    try Task.checkCancellation()
+                    try FileManager.default.moveItem(at: temporary, to: image.url)
+                    return image
                 }
-                defer { try? manager.removeItem(at: temporary) }
-                try validator.validate()
-                try Self.validate(response)
-                guard try Self.verify(temporary, manifest: manifest) else { throw UpdateError.checksumMismatch }
-                try Task.checkCancellation()
-                try manager.moveItem(at: temporary, to: destination)
-                return destination
+            }
+            downloads[key] = DownloadRequest(task: task, users: 1)
+        }
+        defer {
+            if var request = downloads[key] {
+                request.users -= 1
+                downloads[key] = request.users == 0 ? nil : request
             }
         }
-        downloads[manifest.sha256] = download
-        defer { downloads[manifest.sha256] = nil }
-        let file = try await download.value
+        let image = try await task.value
+        defer { withExtendedLifetime(image) {} }
         try Task.checkCancellation()
-        return file
+        return try await operation(image.url)
+    }
+
+    /// Removes abandoned temporary downloads while leaving other processes' active images intact.
+    public func removeStaleDownloads() throws {
+        try TemporaryImage.removeStale(in: directory)
+        try UpdateDownloadCleanup.removeLegacyImages(in: directory)
     }
 
     public func cancel() {
         for request in checkRequests.values { request.cancel() }
-        for download in downloads.values { download.cancel() }
+        for download in downloads.values { download.task.cancel() }
     }
 
     public static func verify(_ file: URL, manifest: UpdateManifest) throws -> Bool {
@@ -112,26 +140,17 @@ public actor UpdateService {
         return digest.finalize().map { String(format: "%02x", $0) }.joined() == manifest.sha256
     }
 
-    private struct FeedResponse: Sendable {
-        let feed: UpdateFeed
-        let etag: String?
-    }
-
     private func feed(for channel: UpdateChannel) async throws -> UpdateFeed {
-        if let request = checkRequests[channel] { return try await request.value.feed }
+        if let request = checkRequests[channel] { return try await request.value }
         let url = try UpdateFeed.url(for: channel, source: feedURL)
-        let cached = cachedFeeds[channel]
         let request = Task { [session] in
-            // Replacing Autobuild's small JSON asset can briefly return 404.
             try await Self.withNetworkRetries(retryNotFound: channel == .autobuild) {
-                try await Self.fetchFeed(url, session: session, cached: cached)
+                try await Self.fetchFeed(url, session: session)
             }
         }
         checkRequests[channel] = request
         defer { checkRequests[channel] = nil }
-        let response = try await request.value
-        cachedFeeds[channel] = response
-        return response.feed
+        return try await request.value
     }
 
     private static func validate(_ response: URLResponse) throws {
@@ -141,22 +160,12 @@ public actor UpdateService {
         }
     }
 
-    private static func fetchFeed(_ url: URL, session: URLSession, cached: FeedResponse?) async throws -> FeedResponse {
+    private static func fetchFeed(_ url: URL, session: URLSession) async throws -> UpdateFeed {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        request.setValue(cached?.etag, forHTTPHeaderField: "If-None-Match")
+        request.setValue("no-cache, no-store", forHTTPHeaderField: "Cache-Control")
         let (bytes, response) = try await session.bytes(for: request)
         defer { bytes.task.cancel() }
-        if let response = response as? HTTPURLResponse, response.statusCode == 304,
-           let cached, let etag = cached.etag {
-            // If-None-Match uses weak comparison; a 304 cannot validate another document.
-            func opaqueTag(_ tag: String) -> Substring { tag.hasPrefix("W/") ? tag.dropFirst(2) : tag[...] }
-            if let received = response.value(forHTTPHeaderField: "ETag"), opaqueTag(received) != opaqueTag(etag) {
-                throw UpdateError.invalidManifest
-            }
-            return cached
-        }
         try validate(response)
         var data = Data()
         for try await byte in bytes {
@@ -164,9 +173,7 @@ public actor UpdateService {
             guard data.count < 16_384 else { throw UpdateError.invalidManifest }
             data.append(byte)
         }
-        let feed = try UpdateFeed(data: data, url: url)
-        let etag = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "ETag")
-        return FeedResponse(feed: feed, etag: etag?.isEmpty == false ? etag : nil)
+        return try UpdateFeed(data: data, url: url)
     }
 
     private static func withNetworkRetries<Value>(retryNotFound: Bool = false, _ operation: () async throws -> Value) async throws -> Value {
@@ -215,6 +222,53 @@ public actor UpdateService {
               [.timedOut, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost,
                .dnsLookupFailed, .notConnectedToInternet].contains(error.code) else { return nil }
         return backoff
+    }
+}
+
+private final class TemporaryImage: Sendable {
+    let directory: URL
+    let lease: UpdateLease
+    var url: URL { directory.appendingPathComponent("image.dmg") }
+
+    init(directory root: URL) throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        let id = UUID().uuidString
+        let creating = root.appendingPathComponent(".creating-\(id)", isDirectory: true)
+        let published = root.appendingPathComponent("download-\(id)", isDirectory: true)
+        try manager.createDirectory(at: creating, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        do {
+            let lock = try UpdateInstaller.acquireLease(directory: creating)
+            try manager.moveItem(at: creating, to: published)
+            directory = published
+            lease = lock
+        } catch {
+            try? manager.removeItem(at: creating)
+            throw error
+        }
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: directory)
+        try? lease.close()
+    }
+
+    static func removeStale(in root: URL) throws {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: root.path) else { return }
+        for directory in try manager.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) {
+            let name = directory.lastPathComponent
+            guard name.hasPrefix("download-"), UUID(uuidString: String(name.dropFirst("download-".count))) != nil,
+                  let values = try? directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  values.isDirectory == true, values.isSymbolicLink == false else { continue }
+            let lease: UpdateLease
+            do { lease = try UpdateInstaller.acquireLease(directory: directory) }
+            catch UpdateError.installationInProgress { continue }
+            catch let error as POSIXError where error.code == .ENOENT { continue }
+            defer { try? lease.close() }
+            do { try manager.removeItem(at: directory) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile { continue }
+        }
     }
 }
 

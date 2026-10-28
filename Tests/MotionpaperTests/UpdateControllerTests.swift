@@ -5,7 +5,7 @@ import UpdateCore
 
 private let autobuildCommit = String(repeating: "b", count: 40)
 private let stableCommit = String(repeating: "c", count: 40)
-private let checksum = String(repeating: "a", count: 64)
+private let checksum = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 private let feedURL = URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild/update.json")!
 private let stableFeedURL = URL(string: "https://github.com/notCorwin/Motionpaper/releases/latest/download/update.json")!
 
@@ -317,6 +317,93 @@ struct UpdateControllerTests {
 
         await fixture.stopController()
     }
+
+    @Test
+    func missingAutobuildImageRefreshesOnceAndUsesTheNewManifest() async throws {
+        let fixture = try UpdateControllerFixture()
+        let old = try #require(try await fixture.service.check())
+        let newerCommit = String(repeating: "d", count: 40)
+        fixture.protocolState.setFeed(try updateFeed(autobuildCommit: newerCommit))
+        fixture.protocolState.setDownloadStatuses([404, 200])
+
+        let installedCommit = try await fixture.controller.withUpdateImage(old, using: fixture.service) { image, target in
+            let data = try Data(contentsOf: image)
+            #expect(data == Data("abc".utf8))
+            return target.commit
+        }
+        #expect(installedCommit == newerCommit)
+        #expect(fixture.protocolState.feedRequestCount == 2)
+        #expect(fixture.protocolState.downloadRequestCount == 2)
+        await fixture.stopController()
+    }
+
+    @Test
+    func missingImageIsNotRetriedWhenFeedStillReferencesTheSameAsset() async throws {
+        let fixture = try UpdateControllerFixture()
+        let old = try #require(try await fixture.service.check())
+        fixture.protocolState.setDownloadStatuses([404])
+        await #expect(throws: UpdateError.self) {
+            try await fixture.controller.withUpdateImage(old, using: fixture.service) { _, target in target.commit }
+        }
+        #expect(fixture.protocolState.feedRequestCount == 2)
+        #expect(fixture.protocolState.downloadRequestCount == 1)
+        await fixture.stopController()
+    }
+
+    @Test
+    func missingImageCanBecomeUpToDateDuringRefresh() async throws {
+        let fixture = try UpdateControllerFixture()
+        let old = try #require(try await fixture.service.check())
+        fixture.protocolState.setFeed(try updateFeed(autobuildCommit: String(repeating: "a", count: 40)))
+        fixture.protocolState.setDownloadStatuses([404])
+        let result = try await fixture.controller.withUpdateImage(old, using: fixture.service) { _, target in target.commit }
+        #expect(result == nil)
+        #expect(fixture.protocolState.feedRequestCount == 2)
+        #expect(fixture.protocolState.downloadRequestCount == 1)
+        await fixture.stopController()
+    }
+
+    @Test
+    func missingReplacementImageDoesNotRepeatFallback() async throws {
+        let fixture = try UpdateControllerFixture()
+        let old = try #require(try await fixture.service.check())
+        fixture.protocolState.setFeed(try updateFeed(autobuildCommit: String(repeating: "d", count: 40)))
+        fixture.protocolState.setDownloadStatuses([404])
+        await #expect(throws: UpdateError.self) {
+            try await fixture.controller.withUpdateImage(old, using: fixture.service) { _, target in target.commit }
+        }
+        #expect(fixture.protocolState.feedRequestCount == 2)
+        #expect(fixture.protocolState.downloadRequestCount == 2)
+        await fixture.stopController()
+    }
+
+    @Test
+    func stableImageFailureDoesNotSwitchToAutobuild() async throws {
+        let fixture = try UpdateControllerFixture()
+        let stable = try #require(try await fixture.service.check(channel: .stable))
+        fixture.protocolState.setDownloadStatuses([404])
+        await #expect(throws: UpdateError.self) {
+            try await fixture.controller.withUpdateImage(stable, using: fixture.service) { _, target in target.commit }
+        }
+        #expect(fixture.protocolState.feedRequestCount == 0)
+        #expect(fixture.protocolState.downloadRequestCount == 1)
+        await fixture.stopController()
+    }
+
+    @Test
+    func preparationErrorNeverTriggersDownloadFallback() async throws {
+        let fixture = try UpdateControllerFixture()
+        let old = try #require(try await fixture.service.check())
+        fixture.protocolState.setDownloadStatuses([200])
+        await #expect(throws: UpdateError.self) {
+            try await fixture.controller.withUpdateImage(old, using: fixture.service) { _, _ -> String in
+                throw UpdateError.httpStatus(404)
+            }
+        }
+        #expect(fixture.protocolState.feedRequestCount == 1)
+        #expect(fixture.protocolState.downloadRequestCount == 1)
+        await fixture.stopController()
+    }
 }
 
 @MainActor
@@ -324,6 +411,7 @@ private final class UpdateControllerFixture {
     let protocolState = UpdateControllerURLProtocol.state
     let session: URLSession
     let controller: UpdateController
+    let service: UpdateService
     private let directory: URL
 
     init(currentCommit: String = String(repeating: "a", count: 40), feed: Data? = nil) throws {
@@ -338,7 +426,7 @@ private final class UpdateControllerFixture {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("motionpaper-update-controller-\(UUID().uuidString)", isDirectory: true)
 
-        let service = UpdateService(feedURL: feedURL, currentCommit: currentCommit,
+        service = UpdateService(feedURL: feedURL, currentCommit: currentCommit,
                                     channel: .autobuild, directory: directory, session: session)
         controller = UpdateController(service: service, channel: .autobuild)
     }
@@ -441,9 +529,9 @@ private final class UpdateControllerURLProtocol: URLProtocol, @unchecked Sendabl
 
     override func stopLoading() {}
 
-    func send(_ data: Data, url: URL) {
-        guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
-                                             headerFields: ["Content-Type": "application/json"]) else {
+    func send(_ data: Data, url: URL, status: Int = 200) {
+        guard let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
+                                             headerFields: ["Content-Length": String(data.count)]) else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }
@@ -461,6 +549,8 @@ private final class UpdateControllerURLProtocolState: @unchecked Sendable {
     private let lock = NSLock()
     private var feedData = Data()
     private var urls: [URL] = []
+    private var downloadStatuses: [Int] = []
+    private var downloadCount = 0
 
     var feedRequestCount: Int {
         lock.lock()
@@ -474,11 +564,19 @@ private final class UpdateControllerURLProtocolState: @unchecked Sendable {
         return urls
     }
 
+    var downloadRequestCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return downloadCount
+    }
+
     func reset(with data: Data) {
         lock.lock()
         defer { lock.unlock() }
         feedData = data
         urls = []
+        downloadStatuses = []
+        downloadCount = 0
     }
 
     func setFeed(_ data: Data) {
@@ -487,11 +585,31 @@ private final class UpdateControllerURLProtocolState: @unchecked Sendable {
         feedData = data
     }
 
+    func setDownloadStatuses(_ statuses: [Int]) {
+        lock.lock()
+        defer { lock.unlock() }
+        downloadStatuses = statuses
+        downloadCount = 0
+    }
+
     func respond(to loader: UpdateControllerURLProtocol, url: URL?) {
         lock.lock()
         if let url { urls.append(url) }
         var data = feedData
+        let isImage = url?.pathExtension == "dmg"
+        let status: Int
+        if isImage, !downloadStatuses.isEmpty {
+            status = downloadStatuses[min(downloadCount, downloadStatuses.count - 1)]
+            downloadCount += 1
+        } else {
+            status = 0
+        }
         lock.unlock()
+
+        if let url, isImage, status != 0 {
+            loader.send(Data((status == 200 ? "abc" : "missing").utf8), url: url, status: status)
+            return
+        }
 
         guard let url, url == feedURL || url == stableFeedURL else {
             loader.fail(URLError(.unsupportedURL))

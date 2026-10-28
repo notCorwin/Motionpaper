@@ -52,7 +52,7 @@ struct UpdateNetworkTests {
     func missingDMGIsNotRetried() async throws {
         let fixture = try NetworkFixture(responses: [.http(status: 404)])
         defer { fixture.cleanUp() }
-        await #expect(throws: UpdateError.self) { try await fixture.service.download(networkManifest()) }
+        await #expect(throws: UpdateError.self) { try await fixture.service.withDownloadedImage(networkManifest()) { try UpdateService.verify($0, manifest: networkManifest()) } }
         #expect(NetworkProtocol.requests.count == 1)
     }
 
@@ -102,7 +102,7 @@ struct UpdateNetworkTests {
         defer { fixture.cleanUp() }
         let request = Task {
             if downloading {
-                _ = try await fixture.service.download(networkManifest())
+                _ = try await fixture.service.withDownloadedImage(networkManifest()) { try UpdateService.verify($0, manifest: networkManifest()) }
             } else {
                 _ = try await fixture.service.check()
             }
@@ -118,8 +118,7 @@ struct UpdateNetworkTests {
         #expect(NetworkProtocol.requests.count == 1)
         if downloading {
             #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).isEmpty)
-            let file = try await fixture.service.download(networkManifest())
-            #expect(try UpdateService.verify(file, manifest: networkManifest()))
+            #expect(try await fixture.service.withDownloadedImage(networkManifest()) { try UpdateService.verify($0, manifest: networkManifest()) })
         } else {
             #expect(try await fixture.service.check()?.commit == networkCommit)
         }
@@ -136,23 +135,54 @@ struct UpdateNetworkTests {
     }
 
     @Test
-    func downloadRetriesServerErrorsAndReusesOnlyVerifiedData() async throws {
+    func downloadsShareOnlyInFlightDataAndLeaveNoCache() async throws {
         let fixture = try NetworkFixture(responses: [
             .http(status: 503, body: Data("Service unavailable".utf8)), .http(body: Data("abc".utf8)),
         ])
         defer { fixture.cleanUp() }
         let manifest = networkManifest()
-        let corruptCache = fixture.directory.appendingPathComponent("\(manifest.commit)-\(manifest.sha256).dmg")
-        try Data("abd".utf8).write(to: corruptCache)
-
-        async let first = fixture.service.download(manifest)
-        async let second = fixture.service.download(manifest)
-        let files = try await (first, second)
-        #expect(files.0 == files.1)
-        #expect(try UpdateService.verify(files.0, manifest: manifest))
-        #expect(try await fixture.service.download(manifest) == files.0)
+        async let first = fixture.service.withDownloadedImage(manifest) { url in
+            try await Task.sleep(for: .milliseconds(100))
+            return try UpdateService.verify(url, manifest: manifest)
+        }
+        async let second = fixture.service.withDownloadedImage(manifest) { url in
+            try await Task.sleep(for: .milliseconds(150))
+            return try UpdateService.verify(url, manifest: manifest)
+        }
+        let result = try await (first, second)
+        #expect(result.0 && result.1)
         #expect(NetworkProtocol.requests.count == 2)
-        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).count == 1)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).isEmpty)
+        #expect(try await fixture.service.withDownloadedImage(manifest) { try UpdateService.verify($0, manifest: manifest) })
+        #expect(NetworkProtocol.requests.count == 3)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).isEmpty)
+    }
+
+    @Test
+    func temporaryImageIsRemovedAfterOperationFailure() async throws {
+        let fixture = try NetworkFixture(responses: [.http(body: Data("abc".utf8))])
+        defer { fixture.cleanUp() }
+        await #expect(throws: UpdateError.self) {
+            try await fixture.service.withDownloadedImage(networkManifest()) { _ -> Bool in throw UpdateError.invalidApplication }
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).isEmpty)
+    }
+
+    @Test
+    func staleCleanupRemovesAbandonedImagesButPreservesActiveDownload() async throws {
+        let fixture = try NetworkFixture(responses: [.http(body: Data("abc".utf8))])
+        defer { fixture.cleanUp() }
+        let abandoned = fixture.directory.appendingPathComponent("download-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: abandoned, withIntermediateDirectories: false)
+        try Data("old".utf8).write(to: abandoned.appendingPathComponent("image.dmg"))
+        let service = fixture.service
+        let valid = try await service.withDownloadedImage(networkManifest()) { image in
+            try await service.removeStaleDownloads()
+            return try UpdateService.verify(image, manifest: networkManifest())
+        }
+        #expect(valid)
+        #expect(!FileManager.default.fileExists(atPath: abandoned.path))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).isEmpty)
     }
 
     @Test(arguments: ["abd", "ab", "abcd"])
@@ -160,7 +190,7 @@ struct UpdateNetworkTests {
         let fixture = try NetworkFixture(responses: [.http(body: Data(body.utf8)), .http(body: Data("abc".utf8))])
         defer { fixture.cleanUp() }
 
-        await #expect(throws: UpdateError.self) { try await fixture.service.download(networkManifest()) }
+        await #expect(throws: UpdateError.self) { try await fixture.service.withDownloadedImage(networkManifest()) { try UpdateService.verify($0, manifest: networkManifest()) } }
         #expect(NetworkProtocol.requests.count == 1)
         #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).isEmpty)
     }
