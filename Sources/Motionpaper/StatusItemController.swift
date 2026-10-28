@@ -183,7 +183,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func update(_ state: PlaybackController.State) {
         symbolView.update(state)
-        let description: String
+        let description: String?
         let failure: String?
         switch state {
         case .disabled:
@@ -193,7 +193,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             description = "正在准备播放…"
             failure = nil
         case .enabled:
-            description = "正在播放"
+            description = nil
             failure = nil
         case .failed(let message):
             description = "无法播放"
@@ -202,8 +202,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             description = "正在恢复播放…"
             failure = message
         }
-        playbackStatusItem.title = description
-        let toolTip = (["Motionpaper", description] + (failure.map { [$0] } ?? [])).joined(separator: "\n")
+        playbackStatusItem.title = description ?? ""
+        playbackStatusItem.isHidden = description == nil
+        let toolTip = (["Motionpaper"] + (description.map { [$0] } ?? []) + (failure.map { [$0] } ?? [])).joined(separator: "\n")
         playbackStatusItem.toolTip = toolTip
         statusItem.button?.toolTip = toolTip
         statusItem.button?.setAccessibilityLabel(toolTip)

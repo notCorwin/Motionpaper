@@ -120,7 +120,7 @@ extension AppDelegate {
                       statusItem.symbolView.playbackEnabled,
                       !statusItem.symbolView.warningEnabled,
                       !statusItem.symbolView.warningAnimationEnabled,
-                      statusItem.symbolView.toolTip == "Motionpaper\n正在播放" else {
+                      statusItem.symbolView.toolTip == "Motionpaper" else {
                     throw NSError(domain: "MotionpaperVerification", code: 8,
                                   userInfo: [NSLocalizedDescriptionKey: "Playback did not recover automatically after retry"])
                 }
@@ -197,16 +197,14 @@ extension AppDelegate {
             case .requiresApproval: loginTitle = "随开机自动启动：等待允许"
             default: loginTitle = "随开机自动启动：否"
             }
-            var expectedMenuItems = [versionTitle, "正在播放", "", "检查更新", "打开 GitHub 仓库", "", loginTitle]
+            var expectedMenuItems = [versionTitle, "", "检查更新", "打开 GitHub 仓库", "", loginTitle]
             if loginStatus == .requiresApproval { expectedMenuItems.append("在系统设置中允许开机启动") }
             expectedMenuItems.append(contentsOf: ["", "退出 Motionpaper"])
-            let separatorOffsets = loginStatus == .requiresApproval ? [2, 5, 8] : [2, 5, 7]
+            let separatorOffsets = loginStatus == .requiresApproval ? [1, 4, 7] : [1, 4, 6]
             guard visibleItems.map(\.title) == expectedMenuItems,
                   visibleItems.enumerated().filter({ $0.element.isSeparatorItem }).map(\.offset) == separatorOffsets,
                   visibleItems.first?.isEnabled == false,
                   visibleItems.first?.action == nil,
-                  !visibleItems[1].isEnabled,
-                  visibleItems[1].action == nil,
                   visibleItems.allSatisfy({ $0.state == .off }),
                   !visibleItems.contains(where: { $0.title == "更新到正式版" }),
                   !statusItem.menu.items.contains(where: { $0.title == "重试播放" }),
@@ -353,7 +351,7 @@ extension AppDelegate {
         let diagnostic = "Native playback acquisition failed"
         let fatalDiagnostic = "Native wallpaper playback is unsupported"
         let longDiagnostic = String(repeating: "墙纸服务暂时没有响应。", count: 8)
-        func requirePlaybackState(_ state: PlaybackController.State, title: String,
+        func requirePlaybackState(_ state: PlaybackController.State, title: String?,
                                   failure: String? = nil,
                                   playback: Bool = false, warning: Bool = false) throws {
             statusItem.update(state)
@@ -363,24 +361,25 @@ extension AppDelegate {
             }
             let statusRow = statusItem.menu.items[1]
             let visibleItems = statusItem.menu.items.filter { !$0.isHidden }
-            let toolTip = (["Motionpaper", title] + (failure.map { [$0] } ?? [])).joined(separator: "\n")
-            guard visibleItems.count > 2, visibleItems[1] === statusRow,
-                  visibleItems[2].isSeparatorItem,
-                  !statusRow.isHidden, !statusRow.isEnabled, statusRow.action == nil,
-                  statusRow.state == .off, statusRow.title == title, statusRow.toolTip == toolTip,
+            let toolTip = (["Motionpaper"] + (title.map { [$0] } ?? []) + (failure.map { [$0] } ?? [])).joined(separator: "\n")
+            guard visibleItems.count > 2,
+                  statusRow.isHidden == (title == nil),
+                  (title == nil ? visibleItems[1].isSeparatorItem : visibleItems[1] === statusRow && visibleItems[2].isSeparatorItem),
+                  !statusRow.isEnabled, statusRow.action == nil,
+                  statusRow.state == .off, statusRow.title == (title ?? ""), statusRow.toolTip == toolTip,
                   !statusItem.menu.items.contains(where: { $0.title == "重试播放" }),
                   statusItem.symbolView.toolTip == toolTip,
                   statusItem.symbolView.superview?.toolTip == toolTip,
                   !statusItem.symbolView.subviews.isEmpty,
                   statusItem.symbolView.subviews.allSatisfy({ $0.toolTip == toolTip }) else {
                 throw NSError(domain: "MotionpaperVerification", code: 17,
-                              userInfo: [NSLocalizedDescriptionKey: "Playback menu or tooltips are incorrect for \(title)"])
+                              userInfo: [NSLocalizedDescriptionKey: "Playback menu or tooltips are incorrect for \(String(describing: title))"])
             }
             try requirePlaybackIndicator(playback: playback, warning: warning)
         }
-        let normalStates: [(PlaybackController.State, String, Bool)] = [
+        let normalStates: [(PlaybackController.State, String?, Bool)] = [
             (.starting, "正在准备播放…", false),
-            (.enabled, "正在播放", true),
+            (.enabled, nil, true),
             (.disabled, "播放已停止", false),
         ]
         for (state, title, playback) in normalStates {
