@@ -178,7 +178,8 @@ def verify_channel_menus(root, binary, fixture_directory):
         information = application / "Contents/Info.plist"
         with information.open("rb") as stream:
             metadata = plistlib.load(stream)
-        feed_url = "https://raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json"
+        path = "latest/download" if channel == "stable" else "download/Autobuild"
+        feed_url = f"https://github.com/notCorwin/Motionpaper/releases/{path}/update.json"
         metadata.update(
             CFBundleShortVersionString="1.0.0",
             MotionpaperReleaseChannel=channel,

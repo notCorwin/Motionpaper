@@ -6,13 +6,14 @@ import UpdateCore
 private let autobuildCommit = String(repeating: "b", count: 40)
 private let stableCommit = String(repeating: "c", count: 40)
 private let checksum = String(repeating: "a", count: 64)
-private let feedURL = URL(string: "https://raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json")!
+private let feedURL = URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild/update.json")!
+private let stableFeedURL = URL(string: "https://github.com/notCorwin/Motionpaper/releases/latest/download/update.json")!
 
 @Suite(.serialized)
 @MainActor
 struct UpdateControllerTests {
     @Test
-    func menuOpenChecksBothChannelsFromOneFeedRequest() async throws {
+    func menuOpenChecksEachChannelsReleaseManifestOnce() async throws {
         let fixture = try UpdateControllerFixture()
 
         var stableChanges: [UpdateManifest?] = []
@@ -34,7 +35,8 @@ struct UpdateControllerTests {
         #expect(stableChanges.first.flatMap { $0 } == nil)
         #expect(stableChanges.last.flatMap { $0?.version?.description } == "1.2.3")
         #expect(fixture.protocolState.feedRequestCount == 1)
-        #expect(fixture.protocolState.requestedURLs == [feedURL])
+        #expect(fixture.protocolState.requestedURLs.count == 2)
+        #expect(Set(fixture.protocolState.requestedURLs) == Set([feedURL, stableFeedURL]))
 
         await fixture.stopController()
     }
@@ -86,7 +88,9 @@ struct UpdateControllerTests {
 
         fixture.protocolState.setFeed(try updateFeed(autobuildCommit: String(repeating: "a", count: 40)))
         fixture.controller.menuWillOpen()
-        let secondCheckFinished = await waitUntil { isUpToDateState(fixture.controller.state) }
+        let secondCheckFinished = await waitUntil {
+            stableChanges.count == 4 && isUpToDateState(fixture.controller.state)
+        }
         #expect(secondCheckFinished)
         #expect(fixture.protocolState.feedRequestCount == 2)
         #expect(stableChanges.count == 4)
@@ -224,7 +228,8 @@ struct UpdateControllerTests {
             return
         }
         #expect(!firstFailure.isEmpty)
-        #expect(fixture.protocolState.requestedURLs == [feedURL])
+        #expect(fixture.protocolState.requestedURLs.count == 2)
+        #expect(Set(fixture.protocolState.requestedURLs) == Set([feedURL, stableFeedURL]))
 
         fixture.controller.menuWillOpen()
         #expect(installationFailure(fixture.controller.state) == firstFailure)
@@ -252,7 +257,8 @@ struct UpdateControllerTests {
 
         let secondFailureArrived = await waitUntil { installationFailure(fixture.controller.state) != nil }
         #expect(secondFailureArrived)
-        #expect(fixture.protocolState.requestedURLs == [feedURL, feedURL])
+        #expect(fixture.protocolState.requestedURLs.count == 4)
+        #expect(fixture.protocolState.requestedURLs.filter { $0 == feedURL } == [feedURL, feedURL])
 
         await fixture.stopController()
     }
@@ -484,15 +490,22 @@ private final class UpdateControllerURLProtocolState: @unchecked Sendable {
     func respond(to loader: UpdateControllerURLProtocol, url: URL?) {
         lock.lock()
         if let url { urls.append(url) }
-        let data = feedData
+        var data = feedData
         lock.unlock()
 
-        guard let url, url == feedURL else {
+        guard let url, url == feedURL || url == stableFeedURL else {
             loader.fail(URLError(.unsupportedURL))
             return
         }
+        if let document = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let channel = url == stableFeedURL ? "stable" : "autobuild"
+            if let entry = document[channel] {
+                data = (try? JSONSerialization.data(withJSONObject: [channel: entry])) ?? data
+            }
+        }
+        let body = data
         DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(50)) {
-            loader.send(data, url: url)
+            loader.send(body, url: url)
         }
     }
 }

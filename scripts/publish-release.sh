@@ -17,7 +17,8 @@ version=${MOTIONPAPER_VERSION:?MOTIONPAPER_VERSION is required}
 }
 
 default_branch=${DEFAULT_BRANCH:-}
-autobuild_body="Automated release for $default_branch commit $commit."
+autobuild_body=$(printf '基于 %s 分支提交 `%s` 自动构建的版本。\n此版本可能存在 Bug，建议使用正式版。\n\nAutomatically built from commit `%s` on the %s branch.\nThis build may contain bugs. We recommend using the stable release.\n' \
+    "$default_branch" "${commit:0:7}" "${commit:0:7}" "$default_branch")
 if [[ $channel == stable ]]; then
     tag="v$version"
     dmg_name="Motionpaper-$tag.dmg"
@@ -30,6 +31,7 @@ dmg_path="dist/$dmg_name"
 download_url="https://github.com/$repository/releases/download/$tag/$dmg_name"
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 if [[ $channel == autobuild ]]; then
     branch_path=$(jq -rn --arg branch "$default_branch" '$branch | @uri')
@@ -188,7 +190,7 @@ validate_stable_dmg_names() {
 }
 
 validate_asset_metadata() {
-    local json_file=$1 asset_name=$2 expected_url=$3 count state size digest browser_url
+    local json_file=$1 asset_name=$2 expected_url=$3 count state size digest browser_url draft_prefix draft_target
     count=$(asset_count "$json_file" "$asset_name")
     [[ $count == 1 ]] || { echo "error: release must contain exactly one $asset_name asset" >&2; return 1; }
     state=$(asset_metadata "$json_file" "$asset_name" state)
@@ -198,8 +200,13 @@ validate_asset_metadata() {
     [[ $state == uploaded && $size =~ ^[1-9][0-9]*$ && $digest =~ ^sha256:[0-9a-f]{64}$ ]] || {
         echo "error: release asset $asset_name has invalid state, size, or SHA-256" >&2; return 1;
     }
-    # Draft assets have temporary untagged URLs until the release is published.
-    if [[ $(jq -r '.draft' "$json_file") != true && $browser_url != "$expected_url" ]]; then
+    # Draft assets may use a temporary untagged URL on the same repository.
+    draft_prefix="https://github.com/$repository/releases/download/untagged-"
+    draft_target=${browser_url#"$draft_prefix"}
+    if [[ $browser_url != "$expected_url" ]] && ! {
+        [[ $(jq -r '.draft' "$json_file") == true && $browser_url == "$draft_prefix"* &&
+           $draft_target == */"$asset_name" && ${draft_target%/*} =~ ^[A-Za-z0-9._-]+$ ]];
+    }; then
         echo "error: release asset $asset_name has an invalid browser_download_url" >&2
         return 1
     fi
@@ -315,10 +322,21 @@ fi
 
 reuse=false
 if [[ $release_is_draft == false ]]; then
-    if [[ $channel == stable || ( $tag_commit == "$commit" && $(jq -r '.body // empty' "$release_file") == "$autobuild_body" ) ]]; then
+    if [[ $channel == stable || $tag_commit == "$commit" ]]; then
         validate_published_release "$release_file"
+        if [[ $channel == autobuild && $(jq -r '.body // empty' "$release_file") != "$autobuild_body" ]]; then
+            skip_if_branch_advanced
+            printf '%s\n' "$autobuild_body" >"$work_dir/release-body.md"
+            jq -n --rawfile body "$work_dir/release-body.md" \
+                '{name: "Autobuild", body: $body, make_latest: "false"}' >"$work_dir/description-request.json"
+            gh api --method PATCH "repos/$repository/releases/$release_id" \
+                --input "$work_dir/description-request.json" >"$release_file"
+            validate_published_release "$release_file"
+            [[ $(jq -r '.body // empty' "$release_file") == "$autobuild_body" ]] || {
+                echo "error: Autobuild description was not updated" >&2; exit 1;
+            }
+        fi
         reuse=true
-        echo "Reusing complete published $channel release $tag."
     fi
 fi
 
@@ -367,6 +385,7 @@ if [[ $reuse == false ]]; then
             >"$work_dir/publish-request.json"
     else
         assert_tag_target
+        python3 "$script_dir/publish-update-feed.py" --verified-release "$work_dir/uploaded.json" --result "$work_dir/feed-result.json"
         fetch_releases "$work_dir/pre-publish-releases.json"
         previous_stable_row=$(highest_stable_release "$work_dir/pre-publish-releases.json")
         make_latest=false
@@ -382,11 +401,22 @@ if [[ $reuse == false ]]; then
     gh api "repos/$repository/releases/$release_id" >"$release_file"
     validate_published_release "$release_file"
     validate_dmg_contents "$release_file" "$verified_dmg_size" "$verified_dmg_digest"
-    echo "Published $channel release $tag for $commit."
+    if [[ $channel == stable ]]; then
+        python3 "$script_dir/publish-update-feed.py" --verified-release "$release_file" --result "$work_dir/feed-result.json" --verify-only
+    fi
 fi
 
-fetch_releases "$work_dir/releases-final.json"
-reconcile_latest_stable "$work_dir/releases-final.json"
+if [[ $channel == autobuild || $reuse == true ]]; then
+    python3 "$script_dir/publish-update-feed.py" --verified-release "$release_file" --result "$work_dir/feed-result.json"
+fi
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-python3 "$script_dir/publish-update-feed.py" --verified-release "$release_file" --result "$work_dir/feed-result.json"
+if [[ $channel == stable ]]; then
+    fetch_releases "$work_dir/releases-final.json"
+    reconcile_latest_stable "$work_dir/releases-final.json"
+fi
+
+if [[ $reuse == false ]]; then
+    echo "Published $channel release $tag for $commit."
+else
+    echo "Reusing complete published $channel release $tag."
+fi

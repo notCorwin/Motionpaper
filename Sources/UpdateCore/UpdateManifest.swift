@@ -21,7 +21,7 @@ public struct UpdateManifest: Equatable, Sendable {
     }
 }
 
-/// One static document supplies both channels without querying the GitHub API.
+/// Static release assets provide update metadata without querying the GitHub API.
 struct UpdateFeed: Sendable {
     let autobuild: UpdateManifest?
     let stable: UpdateManifest?
@@ -78,9 +78,19 @@ struct UpdateFeed: Sendable {
         }
     }
 
+    static func url(for channel: UpdateChannel, source: URL) throws -> URL {
+        guard let repository = repository(in: source) else { throw UpdateError.invalidManifest }
+        return url(for: channel, repository: repository)
+    }
+
+    private static func url(for channel: UpdateChannel, repository: String) -> URL {
+        let path = channel == .autobuild ? "download/Autobuild" : "latest/download"
+        return URL(string: "https://github.com/\(repository)/releases/\(path)/update.json")!
+    }
+
     private static func repository(in url: URL) -> String? {
         let components = url.pathComponents
-        guard components.count == 5, components[3] == "updates", components[4] == "update.json",
+        guard components.count == 7,
               [components[1], components[2]].allSatisfy({ value in
                   !value.isEmpty && value != "." && value != ".." && value.utf8.allSatisfy {
                       (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0)
@@ -88,7 +98,8 @@ struct UpdateFeed: Sendable {
                   }
               }) else { return nil }
         let repository = "\(components[1])/\(components[2])"
-        guard url.absoluteString == "https://raw.githubusercontent.com/\(repository)/updates/update.json" else { return nil }
+        guard url.absoluteString == Self.url(for: .autobuild, repository: repository).absoluteString
+                || url.absoluteString == Self.url(for: .stable, repository: repository).absoluteString else { return nil }
         return repository
     }
 }

@@ -402,7 +402,9 @@ extension AppDelegate {
         try require(url.scheme == "https" && url.host == "github.com" && url.pathComponents.count == 3)
         let owner = url.pathComponents[1]
         let repository = url.pathComponents[2]
-        let feedURL = "https://raw.githubusercontent.com/\(owner)/\(repository)/updates/update.json"
+        let path = Bundle.main.object(forInfoDictionaryKey: "MotionpaperReleaseChannel") as? String == "stable"
+            ? "latest/download" : "download/Autobuild"
+        let feedURL = "https://github.com/\(owner)/\(repository)/releases/\(path)/update.json"
         try require(Bundle.main.object(forInfoDictionaryKey: "MotionpaperUpdateURL") as? String
                     == feedURL)
     }

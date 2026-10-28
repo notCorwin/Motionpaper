@@ -6,7 +6,7 @@ import Testing
 @Suite(.serialized)
 struct UpdateNetworkTests {
     @Test
-    func concurrentChannelsShareTransientFailureRecovery() async throws {
+    func concurrentChannelsRecoverIndependentlyFromTransientFailures() async throws {
         let fixture = try NetworkFixture(responses: [
             .failure(.networkConnectionLost), .http(status: 503), .http(body: feed),
         ])
@@ -18,15 +18,41 @@ struct UpdateNetworkTests {
 
         #expect(results.0?.commit == networkCommit)
         #expect(results.1 == nil)
-        #expect(NetworkProtocol.requests.map(\.url) == Array(repeating: networkFeedURL, count: 3))
+        #expect(NetworkProtocol.requests.count == 4)
+        #expect(NetworkProtocol.requests.filter { $0.url == networkFeedURL }.count == 2)
+        #expect(NetworkProtocol.requests.filter { $0.url?.path.contains("latest") == true }.count == 2)
     }
 
-    @Test(arguments: [304, 401, 403, 404, 422])
+    @Test(arguments: [304, 401, 403, 422])
     func permanentHTTPFailuresAreNotRetried(status: Int) async throws {
         let fixture = try NetworkFixture(responses: [.http(status: status), .http(body: feed)])
         defer { fixture.cleanUp() }
 
         await #expect(throws: UpdateError.self) { try await fixture.service.check() }
+        #expect(NetworkProtocol.requests.count == 1)
+    }
+
+    @Test
+    func missingAutobuildManifestRetriesAnAssetReplacementWindow() async throws {
+        let fixture = try NetworkFixture(responses: [.http(status: 404), .http(body: feed)])
+        defer { fixture.cleanUp() }
+        #expect(try await fixture.service.check()?.commit == networkCommit)
+        #expect(NetworkProtocol.requests.count == 2)
+    }
+
+    @Test
+    func missingManifestHasABoundedRetryBudget() async throws {
+        let fixture = try NetworkFixture(responses: [.http(status: 404)])
+        defer { fixture.cleanUp() }
+        await #expect(throws: UpdateError.self) { try await fixture.service.check() }
+        #expect(NetworkProtocol.requests.count == 3)
+    }
+
+    @Test
+    func missingDMGIsNotRetried() async throws {
+        let fixture = try NetworkFixture(responses: [.http(status: 404)])
+        defer { fixture.cleanUp() }
+        await #expect(throws: UpdateError.self) { try await fixture.service.download(networkManifest()) }
         #expect(NetworkProtocol.requests.count == 1)
     }
 
@@ -140,7 +166,7 @@ struct UpdateNetworkTests {
     }
 }
 
-private let networkFeedURL = URL(string: "https://raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json")!
+private let networkFeedURL = URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild/update.json")!
 private let networkCommit = String(repeating: "b", count: 40)
 private let networkDigest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 private let feed = Data("""

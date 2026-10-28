@@ -9,8 +9,8 @@ public actor UpdateService {
     private let channel: UpdateChannel
     private let session: URLSession
     private let directory: URL
-    private var checkRequest: Task<FeedResponse, any Error>?
-    private var cachedFeed: FeedResponse?
+    private var checkRequests: [UpdateChannel: Task<FeedResponse, any Error>] = [:]
+    private var cachedFeeds: [UpdateChannel: FeedResponse] = [:]
     private var downloads: [String: Task<URL, any Error>] = [:]
 
     public init(feedURL: URL, currentCommit: String, currentVersion: String? = nil,
@@ -25,9 +25,16 @@ public actor UpdateService {
 
     public func check(channel requestedChannel: UpdateChannel? = nil) async throws -> UpdateManifest? {
         try Task.checkCancellation()
-        let feed = try await feed()
+        let requestedChannel = requestedChannel ?? channel
+        let feed: UpdateFeed
+        do {
+            feed = try await self.feed(for: requestedChannel)
+        } catch UpdateError.httpStatus(404) where requestedChannel == .stable && currentVersion == nil {
+            try Task.checkCancellation()
+            return nil
+        }
         try Task.checkCancellation()
-        switch requestedChannel ?? channel {
+        switch requestedChannel {
         case .autobuild:
             guard let manifest = feed.autobuild else { throw UpdateError.invalidManifest }
             return manifest.commit == currentCommit ? nil : manifest
@@ -88,7 +95,7 @@ public actor UpdateService {
     }
 
     public func cancel() {
-        checkRequest?.cancel()
+        for request in checkRequests.values { request.cancel() }
         for download in downloads.values { download.cancel() }
     }
 
@@ -110,17 +117,20 @@ public actor UpdateService {
         let etag: String?
     }
 
-    private func feed() async throws -> UpdateFeed {
-        if let checkRequest { return try await checkRequest.value.feed }
-        let request = Task { [session, feedURL, cachedFeed] in
-            try await Self.withNetworkRetries {
-                try await Self.fetchFeed(feedURL, session: session, cached: cachedFeed)
+    private func feed(for channel: UpdateChannel) async throws -> UpdateFeed {
+        if let request = checkRequests[channel] { return try await request.value.feed }
+        let url = try UpdateFeed.url(for: channel, source: feedURL)
+        let cached = cachedFeeds[channel]
+        let request = Task { [session] in
+            // Replacing Autobuild's small JSON asset can briefly return 404.
+            try await Self.withNetworkRetries(retryNotFound: channel == .autobuild) {
+                try await Self.fetchFeed(url, session: session, cached: cached)
             }
         }
-        checkRequest = request
-        defer { checkRequest = nil }
+        checkRequests[channel] = request
+        defer { checkRequests[channel] = nil }
         let response = try await request.value
-        cachedFeed = response
+        cachedFeeds[channel] = response
         return response.feed
     }
 
@@ -159,7 +169,7 @@ public actor UpdateService {
         return FeedResponse(feed: feed, etag: etag?.isEmpty == false ? etag : nil)
     }
 
-    private static func withNetworkRetries<Value>(_ operation: () async throws -> Value) async throws -> Value {
+    private static func withNetworkRetries<Value>(retryNotFound: Bool = false, _ operation: () async throws -> Value) async throws -> Value {
         var attempt = 0
         while true {
             try Task.checkCancellation()
@@ -169,7 +179,9 @@ public actor UpdateService {
                 return value
             } catch {
                 try Task.checkCancellation()
-                guard attempt < 2, let delay = retryDelay(for: error, attempt: attempt) else {
+                let delay = retryNotFound && (error as? ResponseFailure)?.status == 404
+                    ? Duration.seconds(1) : retryDelay(for: error, attempt: attempt)
+                guard attempt < 2, let delay else {
                     if let response = error as? ResponseFailure { throw UpdateError.httpStatus(response.status) }
                     throw error
                 }

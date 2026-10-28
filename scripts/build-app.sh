@@ -56,7 +56,11 @@ case "$motionpaper_repository" in
 esac
 
 motionpaper_repository_url="https://github.com/$motionpaper_repository"
-motionpaper_update_url="https://raw.githubusercontent.com/$motionpaper_repository/updates/update.json"
+if [ "$motionpaper_channel" = stable ]; then
+    motionpaper_update_url="https://github.com/$motionpaper_repository/releases/latest/download/update.json"
+else
+    motionpaper_update_url="https://github.com/$motionpaper_repository/releases/download/Autobuild/update.json"
+fi
 swift build -c "$motionpaper_configuration" --arch arm64
 motionpaper_arm64_bin=$(swift build -c "$motionpaper_configuration" --arch arm64 --show-bin-path)
 swift build -c "$motionpaper_configuration" --arch x86_64

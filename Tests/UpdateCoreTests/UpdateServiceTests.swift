@@ -3,7 +3,8 @@ import Synchronization
 import Testing
 @testable import UpdateCore
 
-private let feedURL = URL(string: "https://raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json")!
+private let feedURL = URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild/update.json")!
+private let stableFeedURL = URL(string: "https://github.com/notCorwin/Motionpaper/releases/latest/download/update.json")!
 private let commit = String(repeating: "a", count: 40)
 private let nextCommit = String(repeating: "b", count: 40)
 private let digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -71,12 +72,12 @@ struct UpdateServiceTests {
             #expect(throws: UpdateError.self) { try UpdateFeed(data: data, url: feedURL) }
         }
         for address in [
-            "http://raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json",
-            "https://raw.githubusercontent.com/notCorwin/Motionpaper/master/update.json",
-            "https://raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json?cache=1",
-            "https://user@raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json",
-            "https://raw.githubusercontent.com:443/notCorwin/Motionpaper/updates/update.json",
-            "https://raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json#fragment",
+            "http://github.com/notCorwin/Motionpaper/releases/download/Autobuild/update.json",
+            "https://github.com/notCorwin/Motionpaper/releases/download/Other/update.json",
+            "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild/update.json?cache=1",
+            "https://user@github.com/notCorwin/Motionpaper/releases/download/Autobuild/update.json",
+            "https://github.com:443/notCorwin/Motionpaper/releases/download/Autobuild/update.json",
+            "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild/update.json#fragment",
         ] {
             #expect(throws: UpdateError.self) { try UpdateFeed(data: feedData(), url: URL(string: address)!) }
         }
@@ -118,7 +119,7 @@ struct UpdateServiceTests {
     }
 
     @Test
-    func concurrentChecksForBothChannelsShareOneStaticRequest() async throws {
+    func concurrentChecksCoalesceWithinEachChannelAndUseTheirOwnRelease() async throws {
         let fixture = Fixture(responses: [.init(body: try feedData())])
         defer { fixture.close() }
         let service = fixture.service()
@@ -129,8 +130,37 @@ struct UpdateServiceTests {
         #expect(results.0?.commit == commit)
         #expect(results.1 == results.0)
         #expect(results.2?.version == ReleaseVersion("1.2.3"))
-        #expect(FeedProtocol.requests.count == 1)
-        #expect(FeedProtocol.requests.allSatisfy { $0.url == feedURL })
+        #expect(FeedProtocol.requests.count == 2)
+        #expect(Set(FeedProtocol.requests.compactMap(\.url)) == Set([feedURL, stableFeedURL]))
+    }
+
+    @Test
+    func missingStableReleaseIsAbsentForAutobuildButAnErrorForInstalledStable() async throws {
+        let fixture = Fixture(responses: [.init(status: 404)])
+        defer { fixture.close() }
+        #expect(try await fixture.service().check(channel: .stable) == nil)
+        await #expect(throws: UpdateError.self) {
+            try await fixture.service(currentVersion: "1.0.0", channel: .stable).check()
+        }
+        #expect(FeedProtocol.requests.count == 2)
+        #expect(FeedProtocol.requests.allSatisfy { $0.url == stableFeedURL })
+    }
+
+    @Test
+    func eachChannelsValidatorAndCachedContentStayIndependent() async throws {
+        let fixture = Fixture(responses: [
+            .init(body: try feedData(autobuild: entry(), stable: nil), headers: ["ETag": "\"auto\""]),
+            .init(body: try feedData(autobuild: nil, stable: entry(version: "1.2.3")), headers: ["ETag": "\"stable\""]),
+            .init(status: 304), .init(status: 304),
+        ])
+        defer { fixture.close() }
+        let service = fixture.service()
+        #expect(try await service.check()?.commit == commit)
+        #expect(try await service.check(channel: .stable)?.version == ReleaseVersion("1.2.3"))
+        #expect(try await service.check()?.commit == commit)
+        #expect(try await service.check(channel: .stable)?.version == ReleaseVersion("1.2.3"))
+        #expect(FeedProtocol.requests.map { $0.value(forHTTPHeaderField: "If-None-Match") }
+                == [nil, nil, "\"auto\"", "\"stable\""])
     }
 
     @Test
@@ -159,7 +189,7 @@ struct UpdateServiceTests {
         let fixture = Fixture(responses: [
             .init(body: try feedData(), headers: ["ETag": "\"valid\""]),
             .init(body: Data("invalid".utf8), headers: ["ETag": "\"invalid\""]),
-            .init(status: 404), .init(status: 304),
+            .init(status: 403), .init(status: 304),
         ])
         defer { fixture.close() }
         let service = fixture.service()
@@ -218,7 +248,7 @@ struct UpdateServiceTests {
         cancelled.cancel()
         await #expect(throws: CancellationError.self) { try await cancelled.value }
         #expect(try await stable?.version == ReleaseVersion("1.2.3"))
-        #expect(FeedProtocol.requests.count == 1)
+        #expect(FeedProtocol.requests.count == 2)
     }
 
     @Test
@@ -268,15 +298,22 @@ private final class FeedProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        let response = Self.state.withLock { script in
+        var response = Self.state.withLock { script in
             script.requests.append(request)
             return script.responses[min(script.requests.count - 1, script.responses.count - 1)]
         }
-        guard let url = request.url,
-              let http = HTTPURLResponse(url: url, statusCode: response.status, httpVersion: "HTTP/1.1", headerFields: response.headers) else { return }
+        guard let url = request.url else { return }
+        if response.status == 200,
+           let document = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+           document["autobuild"] != nil && document["stable"] != nil {
+            let channel = url == stableFeedURL ? "stable" : "autobuild"
+            response.body = (try? JSONSerialization.data(withJSONObject: [channel: document[channel]!])) ?? response.body
+        }
+        guard let http = HTTPURLResponse(url: url, statusCode: response.status, httpVersion: "HTTP/1.1", headerFields: response.headers) else { return }
+        let body = response.body
         DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(50)) { [self] in
             client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
-            if !response.body.isEmpty { client?.urlProtocol(self, didLoad: response.body) }
+            if !body.isEmpty { client?.urlProtocol(self, didLoad: body) }
             client?.urlProtocolDidFinishLoading(self)
         }
     }
