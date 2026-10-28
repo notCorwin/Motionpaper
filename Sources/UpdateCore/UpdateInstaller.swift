@@ -200,7 +200,12 @@ public struct PreparedUpdate: Codable, Sendable {
     }
 
     public func acquireInstallerLease() throws -> UpdateLease {
-        try UpdateInstaller.acquireLease(directory: directory, lockFile: "installer-lock")
+        let path = destination.resolvingSymlinksInPath().path
+        let digest = SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+        // This file must outlive each transaction. Unlinking it could let another
+        // installer lock a new inode while the current installer still owns the old one.
+        return try UpdateInstaller.acquireLease(directory: destination.deletingLastPathComponent(),
+                                                 lockFile: ".motionpaper-install-\(digest).lock")
     }
 
     public static func load(from directory: URL) throws -> Self {
@@ -292,12 +297,19 @@ public struct PreparedUpdate: Codable, Sendable {
             throw UpdateError.installationChanged
         }
         try UpdateInstaller.validateApplication(replacement, commit: commit)
+        let replacementIdentity = try UpdateInstaller.applicationIdentity(replacement)
         try exchange()
         do {
             try await relaunch(destination, commit)
             try? Data().write(to: completed, options: .atomic)
         } catch {
-            do { try exchange() }
+            do {
+                // A different install or manual replacement must not be overwritten by rollback.
+                guard try UpdateInstaller.applicationIdentity(destination) == replacementIdentity else {
+                    throw UpdateError.installationChanged
+                }
+                try exchange()
+            }
             catch {
                 preserveBackup = true
                 throw UpdateError.rollbackFailed(replacement.path)

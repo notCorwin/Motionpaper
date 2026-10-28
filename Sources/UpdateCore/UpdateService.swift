@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Synchronization
 
 public actor UpdateService {
     private let releaseURL: URL
@@ -42,14 +43,26 @@ public actor UpdateService {
                 if try Self.verify(destination, manifest: manifest) { return destination }
                 try manager.removeItem(at: destination)
             }
-            let request = URLRequest(url: manifest.downloadURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 300)
-            let (temporary, response) = try await session.download(for: request, delegate: DownloadSizeLimit(size: manifest.size))
-            defer { try? manager.removeItem(at: temporary) }
-            try Self.validate(response)
-            guard try Self.verify(temporary, manifest: manifest) else { throw UpdateError.checksumMismatch }
-            try Task.checkCancellation()
-            try manager.moveItem(at: temporary, to: destination)
-            return destination
+            return try await Self.withNetworkRetries {
+                let request = URLRequest(url: manifest.downloadURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 300)
+                let validator = DownloadValidator(size: manifest.size)
+                let temporary: URL
+                let response: URLResponse
+                do {
+                    (temporary, response) = try await session.download(for: request, delegate: validator)
+                } catch {
+                    // A rejected response cancels URLSession, but must retain its HTTP or integrity error.
+                    try validator.validate()
+                    throw error
+                }
+                defer { try? manager.removeItem(at: temporary) }
+                try validator.validate()
+                try Self.validate(response)
+                guard try Self.verify(temporary, manifest: manifest) else { throw UpdateError.checksumMismatch }
+                try Task.checkCancellation()
+                try manager.moveItem(at: temporary, to: destination)
+                return destination
+            }
         }
         downloads[manifest.sha256] = download
         defer { downloads[manifest.sha256] = nil }
@@ -167,15 +180,23 @@ public actor UpdateService {
 
     private static func validate(_ response: URLResponse) throws {
         guard let response = response as? HTTPURLResponse else { throw UpdateError.invalidManifest }
-        guard response.statusCode == 200 else { throw UpdateError.httpStatus(response.statusCode) }
+        guard response.statusCode == 200 else {
+            throw ResponseFailure(status: response.statusCode, retryAfter: response.value(forHTTPHeaderField: "Retry-After"))
+        }
     }
 
     private static func fetch(_ url: URL, session: URLSession, maximumSize: Int) async throws -> (Data, HTTPURLResponse) {
+        // Retry this page only; successful earlier pages remain part of the shared catalog request.
+        try await withNetworkRetries { try await fetchOnce(url, session: session, maximumSize: maximumSize) }
+    }
+
+    private static func fetchOnce(_ url: URL, session: URLSession, maximumSize: Int) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
         try validate(response)
         guard let response = response as? HTTPURLResponse else { throw UpdateError.invalidManifest }
         var data = Data()
@@ -185,6 +206,52 @@ public actor UpdateService {
             data.append(byte)
         }
         return (data, response)
+    }
+
+    private static func withNetworkRetries<Value>(_ operation: () async throws -> Value) async throws -> Value {
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                let value = try await operation()
+                try Task.checkCancellation()
+                return value
+            } catch {
+                try Task.checkCancellation()
+                guard attempt < 2, let delay = retryDelay(for: error, attempt: attempt) else {
+                    if let response = error as? ResponseFailure { throw UpdateError.httpStatus(response.status) }
+                    throw error
+                }
+                attempt += 1
+                try await Task.sleep(for: delay)
+            }
+        }
+    }
+
+    private static func retryDelay(for error: any Error, attempt: Int) -> Duration? {
+        let backoff = Duration.seconds(1 << attempt)
+        if let response = error as? ResponseFailure {
+            guard [408, 429, 500, 502, 503, 504].contains(response.status) else { return nil }
+            guard let retryAfter = response.retryAfter else { return backoff }
+            let seconds: TimeInterval
+            if let value = TimeInterval(retryAfter.trimmingCharacters(in: .whitespaces)) {
+                seconds = value
+            } else {
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+                guard let date = formatter.date(from: retryAfter) else { return nil }
+                seconds = max(0, date.timeIntervalSinceNow)
+            }
+            // Do not retry before the server allows it, or keep a menu action waiting on a long rate limit.
+            guard seconds.isFinite, seconds >= 0, seconds <= 30 else { return nil }
+            return max(backoff, .seconds(seconds))
+        }
+        guard let error = error as? URLError,
+              [.timedOut, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost,
+               .dnsLookupFailed, .notConnectedToInternet].contains(error.code) else { return nil }
+        return backoff
     }
 
     private static func nextPageURL(from response: HTTPURLResponse,
@@ -235,14 +302,35 @@ public actor UpdateService {
     }
 }
 
-private final class DownloadSizeLimit: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+private struct ResponseFailure: Error {
+    let status: Int
+    let retryAfter: String?
+}
+
+private final class DownloadValidator: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let size: Int64
+    private let failure = Mutex<(any Error)?>(nil)
 
     init(size: Int64) { self.size = size }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        if totalBytesWritten > size || totalBytesExpectedToWrite > size { downloadTask.cancel() }
+        let error: (any Error)?
+        if let response = downloadTask.response as? HTTPURLResponse, response.statusCode != 200 {
+            error = ResponseFailure(status: response.statusCode, retryAfter: response.value(forHTTPHeaderField: "Retry-After"))
+        } else if totalBytesWritten > size || totalBytesExpectedToWrite > size {
+            error = UpdateError.checksumMismatch
+        } else {
+            error = nil
+        }
+        if let error {
+            failure.withLock { if $0 == nil { $0 = error } }
+            downloadTask.cancel()
+        }
+    }
+
+    func validate() throws {
+        if let error = failure.withLock({ $0 }) { throw error }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,

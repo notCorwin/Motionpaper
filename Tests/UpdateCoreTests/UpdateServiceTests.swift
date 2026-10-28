@@ -401,7 +401,7 @@ private func catalogJSON(_ releases: [Data]) throws -> Data {
 
     #expect(try await freshCheck.check()?.version == ReleaseVersion("1.0.0"))
     await #expect(throws: UpdateError.self) { try await freshCheck.check() }
-    #expect(StableReleaseProtocol.recordedRequests().count == 2)
+    #expect(StableReleaseProtocol.recordedRequests().count == 4)
 }
 
 private final class UpdateProtocol: URLProtocol, @unchecked Sendable {

@@ -40,6 +40,32 @@ private let mismatchedCommit = String(repeating: "d", count: 40)
     #expect(!FileManager.default.fileExists(atPath: update.directory.path))
 }
 
+@Test func rollbackPreservesBackupWithoutOverwritingAnApplicationChangedDuringLaunch() async throws {
+    let fixture = try InstallerFixture()
+    defer { fixture.cleanUp() }
+    let update = try fixture.makeUpdate(commit: candidateCommit)
+    let changed = fixture.root.appendingPathComponent("Changed.app", isDirectory: true)
+    try makeApplication(at: changed, commit: changedCommit)
+    try fixture.writePlan(update)
+    try Data(candidateCommit.utf8).write(to: update.authorization, options: .atomic)
+
+    do {
+        try await update.install { application, _ in
+            try FileManager.default.removeItem(at: application)
+            try FileManager.default.moveItem(at: changed, to: application)
+            throw RelaunchProbe.Failure.firstAttempt
+        }
+        Issue.record("Installation must fail when the destination changes during launch")
+    } catch UpdateError.rollbackFailed(let backup) {
+        #expect(backup == update.replacement.path)
+    }
+
+    #expect(try UpdateInstaller.bundleCommit(fixture.destination) == changedCommit)
+    #expect(try UpdateInstaller.bundleCommit(update.replacement) == originalCommit)
+    try await UpdateInstaller.removeStaleInstallations(application: fixture.destination)
+    #expect(try UpdateInstaller.bundleCommit(update.replacement) == originalCommit)
+}
+
 @Test func testUpdateInstallerRejectsCandidateWithMismatchedCommit() async throws {
     let fixture = try InstallerFixture()
     defer { fixture.cleanUp() }
@@ -220,6 +246,29 @@ func testUpdateInstallerConfirmsLaunchForMatchingApplicationAndFullCommit(instal
     try lease.close()
     try await UpdateInstaller.removeStaleInstallations(application: fixture.destination)
     #expect(!FileManager.default.fileExists(atPath: update.directory.path))
+}
+
+@Test func distinctTransactionsForTheSameApplicationShareAnInstallerLock() throws {
+    let fixture = try InstallerFixture()
+    defer { fixture.cleanUp() }
+    let first = try fixture.makeUpdate(commit: candidateCommit)
+    let second = try fixture.makeUpdate(commit: changedCommit)
+    let otherFixture = try InstallerFixture()
+    defer { otherFixture.cleanUp() }
+    let other = try otherFixture.makeUpdate(commit: candidateCommit)
+
+    let lease = try first.acquireInstallerLease()
+    defer { try? lease.close() }
+    #expect(throws: UpdateError.self) { try second.acquireInstallerLease() }
+    let independentLease = try other.acquireInstallerLease()
+    try independentLease.close()
+
+    // Removing a completed transaction must not change the inode being locked.
+    first.discard()
+    #expect(throws: UpdateError.self) { try second.acquireInstallerLease() }
+    try lease.close()
+    let retryLease = try second.acquireInstallerLease()
+    try retryLease.close()
 }
 
 @Test(arguments: [candidateCommit, originalCommit])
