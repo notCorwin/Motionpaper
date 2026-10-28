@@ -6,13 +6,13 @@ import UpdateCore
 private let autobuildCommit = String(repeating: "b", count: 40)
 private let stableCommit = String(repeating: "c", count: 40)
 private let checksum = String(repeating: "a", count: 64)
-private let catalogURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100")!
+private let feedURL = URL(string: "https://raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json")!
 
 @Suite(.serialized)
 @MainActor
 struct UpdateControllerTests {
     @Test
-    func menuOpenChecksBothChannelsFromOneCatalogRequest() async throws {
+    func menuOpenChecksBothChannelsFromOneFeedRequest() async throws {
         let fixture = try UpdateControllerFixture()
 
         var stableChanges: [UpdateManifest?] = []
@@ -33,8 +33,8 @@ struct UpdateControllerTests {
         #expect(stableChanges.count == 2)
         #expect(stableChanges.first.flatMap { $0 } == nil)
         #expect(stableChanges.last.flatMap { $0?.version?.description } == "1.2.3")
-        #expect(fixture.protocolState.catalogRequestCount == 1)
-        #expect(fixture.protocolState.requestedURLs == [catalogURL])
+        #expect(fixture.protocolState.feedRequestCount == 1)
+        #expect(fixture.protocolState.requestedURLs == [feedURL])
 
         await fixture.stopController()
     }
@@ -49,7 +49,7 @@ struct UpdateControllerTests {
         fixture.controller.start()
         try await Task.sleep(for: .milliseconds(150))
 
-        #expect(fixture.protocolState.catalogRequestCount == 0)
+        #expect(fixture.protocolState.feedRequestCount == 0)
         #expect(isIdle(fixture.controller.state))
         await fixture.stopController()
     }
@@ -66,13 +66,13 @@ struct UpdateControllerTests {
 
         let updateArrived = await waitUntil { isAvailable(fixture.controller.state) }
         #expect(updateArrived)
-        #expect(fixture.protocolState.catalogRequestCount == 1)
+        #expect(fixture.protocolState.feedRequestCount == 1)
 
         await fixture.stopController()
     }
 
     @Test
-    func aLaterMenuOpenChecksTheCurrentCatalogAgain() async throws {
+    func aLaterMenuOpenChecksTheCurrentFeedAgain() async throws {
         let fixture = try UpdateControllerFixture()
         var stableChanges: [UpdateManifest?] = []
         fixture.controller.onStableReleaseChange = { stableChanges.append($0) }
@@ -82,13 +82,13 @@ struct UpdateControllerTests {
             stableChanges.count == 2 && isAvailable(fixture.controller.state)
         }
         #expect(firstCheckFinished)
-        #expect(fixture.protocolState.catalogRequestCount == 1)
+        #expect(fixture.protocolState.feedRequestCount == 1)
 
-        fixture.protocolState.setCatalog(try releasesCatalog(autobuildCommit: String(repeating: "a", count: 40)))
+        fixture.protocolState.setFeed(try updateFeed(autobuildCommit: String(repeating: "a", count: 40)))
         fixture.controller.menuWillOpen()
         let secondCheckFinished = await waitUntil { isUpToDateState(fixture.controller.state) }
         #expect(secondCheckFinished)
-        #expect(fixture.protocolState.catalogRequestCount == 2)
+        #expect(fixture.protocolState.feedRequestCount == 2)
         #expect(stableChanges.count == 4)
         #expect(stableChanges.last.flatMap { $0?.version?.description } == "1.2.3")
 
@@ -125,7 +125,7 @@ struct UpdateControllerTests {
 
     @Test
     func failedCheckCanBeRetried() async throws {
-        let fixture = try UpdateControllerFixture(catalog: Data("not a release catalog".utf8))
+        let fixture = try UpdateControllerFixture(feed: Data("not an update feed".utf8))
 
         fixture.controller.checkForUpdates()
         let firstFailureArrived = await waitUntil { checkFailure(fixture.controller.state) != nil }
@@ -135,13 +135,13 @@ struct UpdateControllerTests {
             return
         }
         #expect(!firstFailure.isEmpty)
-        #expect(fixture.protocolState.catalogRequestCount == 1)
+        #expect(fixture.protocolState.feedRequestCount == 1)
 
-        fixture.protocolState.setCatalog(try releasesCatalog())
+        fixture.protocolState.setFeed(try updateFeed())
         fixture.controller.checkForUpdates()
         let retrySucceeded = await waitUntil { isAvailable(fixture.controller.state) }
         #expect(retrySucceeded)
-        #expect(fixture.protocolState.catalogRequestCount == 2)
+        #expect(fixture.protocolState.feedRequestCount == 2)
 
         await fixture.stopController()
     }
@@ -158,11 +158,11 @@ struct UpdateControllerTests {
         fixture.controller.menuWillOpen()
 
         #expect(installationFailure(fixture.controller.state) == message)
-        #expect(fixture.protocolState.catalogRequestCount == 0)
+        #expect(fixture.protocolState.feedRequestCount == 0)
 
         fixture.controller.menuWillOpen()
         #expect(installationFailure(fixture.controller.state) == message)
-        #expect(fixture.protocolState.catalogRequestCount == 0)
+        #expect(fixture.protocolState.feedRequestCount == 0)
 
         await fixture.stopController()
     }
@@ -213,7 +213,7 @@ struct UpdateControllerTests {
             fixture.controller.menuWillOpen()
         }
         #expect(isDownloading(fixture.controller.state))
-        #expect(fixture.protocolState.catalogRequestCount == 1)
+        #expect(fixture.protocolState.feedRequestCount == 1)
         fixture.controller.installAvailableUpdate()
         #expect(downloadingManifests == [manifest])
 
@@ -224,11 +224,11 @@ struct UpdateControllerTests {
             return
         }
         #expect(!firstFailure.isEmpty)
-        #expect(fixture.protocolState.requestedURLs == [catalogURL])
+        #expect(fixture.protocolState.requestedURLs == [feedURL])
 
         fixture.controller.menuWillOpen()
         #expect(installationFailure(fixture.controller.state) == firstFailure)
-        #expect(fixture.protocolState.catalogRequestCount == 1)
+        #expect(fixture.protocolState.feedRequestCount == 1)
 
         fixture.controller.installAvailableUpdate()
         fixture.controller.installAvailableUpdate()
@@ -236,7 +236,7 @@ struct UpdateControllerTests {
         #expect(installationFailure(fixture.controller.state) == firstFailure)
 
         let newerCommit = String(repeating: "d", count: 40)
-        fixture.protocolState.setCatalog(try releasesCatalog(autobuildCommit: newerCommit))
+        fixture.protocolState.setFeed(try updateFeed(autobuildCommit: newerCommit))
         fixture.controller.checkForUpdates()
         let newerUpdateArrived = await waitUntil { isAvailable(fixture.controller.state) }
         #expect(newerUpdateArrived)
@@ -252,7 +252,7 @@ struct UpdateControllerTests {
 
         let secondFailureArrived = await waitUntil { installationFailure(fixture.controller.state) != nil }
         #expect(secondFailureArrived)
-        #expect(fixture.protocolState.requestedURLs == [catalogURL, catalogURL])
+        #expect(fixture.protocolState.requestedURLs == [feedURL, feedURL])
 
         await fixture.stopController()
     }
@@ -270,7 +270,7 @@ struct UpdateControllerTests {
         fixture.controller.installAvailableUpdate()
         #expect(await waitUntil { installationFailure(fixture.controller.state) != nil })
 
-        fixture.protocolState.setCatalog(Data("not a release catalog".utf8))
+        fixture.protocolState.setFeed(Data("not an update feed".utf8))
         fixture.controller.checkForUpdates()
         #expect(await waitUntil { checkFailure(fixture.controller.state) != nil })
         fixture.controller.installAvailableUpdate()
@@ -298,7 +298,7 @@ struct UpdateControllerTests {
         fixture.controller.installAvailableUpdate()
         #expect(downloadingManifests.count == 1)
 
-        fixture.protocolState.setCatalog(try releasesCatalog(stableVersion: "1.2.4"))
+        fixture.protocolState.setFeed(try updateFeed(stableVersion: "1.2.4"))
         fixture.controller.checkForUpdates()
         #expect(await waitUntil {
             stableRelease?.version?.description == "1.2.4" && isUpToDateState(fixture.controller.state)
@@ -307,7 +307,7 @@ struct UpdateControllerTests {
         fixture.controller.installStableRelease()
         #expect(downloadingManifests.map { $0.version?.description } == ["1.2.3", "1.2.4"])
         #expect(await waitUntil { installationFailure(fixture.controller.state) != nil })
-        #expect(fixture.protocolState.catalogRequestCount == 2)
+        #expect(fixture.protocolState.feedRequestCount == 2)
 
         await fixture.stopController()
     }
@@ -320,11 +320,11 @@ private final class UpdateControllerFixture {
     let controller: UpdateController
     private let directory: URL
 
-    init(currentCommit: String = String(repeating: "a", count: 40), catalog: Data? = nil) throws {
-        let catalogData: Data
-        if let catalog { catalogData = catalog }
-        else { catalogData = try releasesCatalog() }
-        protocolState.reset(with: catalogData)
+    init(currentCommit: String = String(repeating: "a", count: 40), feed: Data? = nil) throws {
+        let feedData: Data
+        if let feed { feedData = feed }
+        else { feedData = try updateFeed() }
+        protocolState.reset(with: feedData)
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [UpdateControllerURLProtocol.self]
@@ -332,7 +332,7 @@ private final class UpdateControllerFixture {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("motionpaper-update-controller-\(UUID().uuidString)", isDirectory: true)
 
-        let service = UpdateService(releaseURL: catalogURL, currentCommit: currentCommit,
+        let service = UpdateService(feedURL: feedURL, currentCommit: currentCommit,
                                     channel: .autobuild, directory: directory, session: session)
         controller = UpdateController(service: service, channel: .autobuild)
     }
@@ -402,39 +402,22 @@ private func installationFailure(_ state: UpdateController.State) -> String? {
     return nil
 }
 
-private func releasesCatalog(autobuildCommit commit: String = autobuildCommit,
+private func updateFeed(autobuildCommit commit: String = autobuildCommit,
                              stableVersion: String = "1.2.3") throws -> Data {
-    let autobuildTag = "Autobuild-\(commit)"
+    let autobuildTag = "Autobuild"
     let autobuildName = "Motionpaper-\(commit.prefix(12)).dmg"
     let stableTag = "v\(stableVersion)"
     let stableName = "Motionpaper-v\(stableVersion).dmg"
-    let releases: [[String: Any]] = [
-        [
-            "tag_name": autobuildTag,
-            "published_at": "2026-10-25T00:00:00Z",
-            "draft": false,
-            "prerelease": false,
-            "assets": [[
-                "name": autobuildName,
-                "state": "uploaded",
-                "browser_download_url": "https://github.com/notCorwin/Motionpaper/releases/download/\(autobuildTag)/\(autobuildName)",
-                "size": 3,
-                "digest": "sha256:\(checksum)",
-            ]],
+    let releases: [String: Any] = [
+        "autobuild": [
+            "commit": commit, "publishedAt": "2026-10-25T00:00:00Z",
+            "downloadURL": "https://github.com/notCorwin/Motionpaper/releases/download/\(autobuildTag)/\(autobuildName)",
+            "size": 3, "sha256": checksum,
         ],
-        [
-            "tag_name": stableTag,
-            "target_commitish": stableCommit,
-            "published_at": "2026-10-25T00:00:00Z",
-            "draft": false,
-            "prerelease": false,
-            "assets": [[
-                "name": stableName,
-                "state": "uploaded",
-                "browser_download_url": "https://github.com/notCorwin/Motionpaper/releases/download/\(stableTag)/\(stableName)",
-                "size": 3,
-                "digest": "sha256:\(checksum)",
-            ]],
+        "stable": [
+            "commit": stableCommit, "version": stableVersion, "publishedAt": "2026-10-25T00:00:00Z",
+            "downloadURL": "https://github.com/notCorwin/Motionpaper/releases/download/\(stableTag)/\(stableName)",
+            "size": 3, "sha256": checksum,
         ],
     ]
     return try JSONSerialization.data(withJSONObject: releases)
@@ -470,13 +453,13 @@ private final class UpdateControllerURLProtocol: URLProtocol, @unchecked Sendabl
 
 private final class UpdateControllerURLProtocolState: @unchecked Sendable {
     private let lock = NSLock()
-    private var catalogData = Data()
+    private var feedData = Data()
     private var urls: [URL] = []
 
-    var catalogRequestCount: Int {
+    var feedRequestCount: Int {
         lock.lock()
         defer { lock.unlock() }
-        return urls.filter { $0 == catalogURL }.count
+        return urls.filter { $0 == feedURL }.count
     }
 
     var requestedURLs: [URL] {
@@ -488,23 +471,23 @@ private final class UpdateControllerURLProtocolState: @unchecked Sendable {
     func reset(with data: Data) {
         lock.lock()
         defer { lock.unlock() }
-        catalogData = data
+        feedData = data
         urls = []
     }
 
-    func setCatalog(_ data: Data) {
+    func setFeed(_ data: Data) {
         lock.lock()
         defer { lock.unlock() }
-        catalogData = data
+        feedData = data
     }
 
     func respond(to loader: UpdateControllerURLProtocol, url: URL?) {
         lock.lock()
         if let url { urls.append(url) }
-        let data = catalogData
+        let data = feedData
         lock.unlock()
 
-        guard let url, url == catalogURL else {
+        guard let url, url == feedURL else {
             loader.fail(URLError(.unsupportedURL))
             return
         }

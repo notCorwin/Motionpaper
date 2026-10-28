@@ -3,19 +3,19 @@ import Foundation
 import Synchronization
 
 public actor UpdateService {
-    private let releaseURL: URL
+    private let feedURL: URL
     private let currentCommit: String
     private let currentVersion: String?
     private let channel: UpdateChannel
     private let session: URLSession
     private let directory: URL
-    private var checkTasks: [UpdateChannel: Task<UpdateManifest?, any Error>] = [:]
-    private var catalogRequest: Task<[Data], any Error>?
+    private var checkRequest: Task<FeedResponse, any Error>?
+    private var cachedFeed: FeedResponse?
     private var downloads: [String: Task<URL, any Error>] = [:]
 
-    public init(releaseURL: URL, currentCommit: String, currentVersion: String? = nil,
+    public init(feedURL: URL, currentCommit: String, currentVersion: String? = nil,
                 channel: UpdateChannel = .autobuild, directory: URL, session: URLSession = .shared) {
-        self.releaseURL = releaseURL
+        self.feedURL = feedURL
         self.currentCommit = currentCommit
         self.currentVersion = currentVersion
         self.channel = channel
@@ -24,17 +24,33 @@ public actor UpdateService {
     }
 
     public func check(channel requestedChannel: UpdateChannel? = nil) async throws -> UpdateManifest? {
-        let requestedChannel = requestedChannel ?? channel
-        if let task = checkTasks[requestedChannel] { return try await task.value }
-
-        let task = Task { try await self.update(for: requestedChannel) }
-        checkTasks[requestedChannel] = task
-        defer { checkTasks[requestedChannel] = nil }
-        return try await task.value
+        try Task.checkCancellation()
+        let feed = try await feed()
+        try Task.checkCancellation()
+        switch requestedChannel ?? channel {
+        case .autobuild:
+            guard let manifest = feed.autobuild else { throw UpdateError.invalidManifest }
+            return manifest.commit == currentCommit ? nil : manifest
+        case .stable:
+            guard let manifest = feed.stable else {
+                if currentVersion != nil { throw UpdateError.invalidManifest }
+                return nil
+            }
+            guard let currentVersion else { return manifest }
+            guard let current = ReleaseVersion(currentVersion), let latest = manifest.version else {
+                throw UpdateError.invalidManifest
+            }
+            return latest > current ? manifest : nil
+        }
     }
 
     public func download(_ manifest: UpdateManifest) async throws -> URL {
-        if let download = downloads[manifest.sha256] { return try await download.value }
+        try Task.checkCancellation()
+        if let download = downloads[manifest.sha256] {
+            let file = try await download.value
+            try Task.checkCancellation()
+            return file
+        }
         let download = Task { [session, directory] in
             let manager = FileManager.default
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -66,12 +82,13 @@ public actor UpdateService {
         }
         downloads[manifest.sha256] = download
         defer { downloads[manifest.sha256] = nil }
-        return try await download.value
+        let file = try await download.value
+        try Task.checkCancellation()
+        return file
     }
 
     public func cancel() {
-        for task in checkTasks.values { task.cancel() }
-        catalogRequest?.cancel()
+        checkRequest?.cancel()
         for download in downloads.values { download.cancel() }
     }
 
@@ -88,94 +105,23 @@ public actor UpdateService {
         return digest.finalize().map { String(format: "%02x", $0) }.joined() == manifest.sha256
     }
 
-    private func update(for channel: UpdateChannel) async throws -> UpdateManifest? {
-        let releases = try await catalog()
-        switch channel {
-        case .autobuild:
-            var latest: (data: Data, publishedAt: Date)?
-            for release in releases {
-                try Task.checkCancellation()
-                guard let publishedAt = try UpdateManifest.autobuildPublishedAt(in: release) else { continue }
-                if latest == nil || publishedAt > latest!.publishedAt {
-                    latest = (release, publishedAt)
-                }
-            }
-            guard let latest else { throw UpdateError.invalidManifest }
-            let manifest = try UpdateManifest.decode(latest.data, releaseURL: releaseURL)
-            return manifest.commit == currentCommit ? nil : manifest
-
-        case .stable:
-            var highestVersion: ReleaseVersion?
-            var latestRelease: Data?
-            for release in releases {
-                try Task.checkCancellation()
-                guard let version = try UpdateManifest.stableVersion(in: release) else { continue }
-                if highestVersion == nil || version > highestVersion! {
-                    highestVersion = version
-                    latestRelease = release
-                }
-            }
-
-            guard let latestRelease else {
-                if currentVersion != nil { throw UpdateError.invalidManifest }
-                return nil
-            }
-            let manifest = try UpdateManifest.decodeStableRelease(latestRelease, releaseURL: releaseURL)
-            guard let currentVersion else { return manifest }
-            guard let current = ReleaseVersion(currentVersion), let latest = manifest.version else {
-                throw UpdateError.invalidManifest
-            }
-            return latest > current ? manifest : nil
-        }
+    private struct FeedResponse: Sendable {
+        let feed: UpdateFeed
+        let etag: String?
     }
 
-    private func catalog() async throws -> [Data] {
-        if let catalogRequest { return try await catalogRequest.value }
-        guard let repository = UpdateManifest.repository(in: releaseURL) else {
-            throw UpdateError.invalidManifest
-        }
-
-        let request = Task { [session, releaseURL] in
-            try await Self.fetchCatalog(releaseURL: releaseURL, repository: repository, session: session)
-        }
-        catalogRequest = request
-        defer { catalogRequest = nil }
-        return try await request.value
-    }
-
-    private static func fetchCatalog(releaseURL: URL,
-                                     repository: (owner: String, name: String),
-                                     session: URLSession) async throws -> [Data] {
-        var pageURL = releaseURL
-        var page = 1
-        var releases: [Data] = []
-
-        while true {
-            try Task.checkCancellation()
-            let (data, response) = try await fetch(pageURL, session: session, maximumSize: 1_048_576)
-            let pageReleases: [[String: Any]]
-            do {
-                guard let decoded = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-                      decoded.count <= 100 else { throw UpdateError.invalidManifest }
-                pageReleases = decoded
-            } catch {
-                throw UpdateError.invalidManifest
+    private func feed() async throws -> UpdateFeed {
+        if let checkRequest { return try await checkRequest.value.feed }
+        let request = Task { [session, feedURL, cachedFeed] in
+            try await Self.withNetworkRetries {
+                try await Self.fetchFeed(feedURL, session: session, cached: cachedFeed)
             }
-
-            for release in pageReleases {
-                do {
-                    releases.append(try JSONSerialization.data(withJSONObject: release))
-                } catch {
-                    throw UpdateError.invalidManifest
-                }
-            }
-
-            guard let nextPage = try nextPageURL(from: response, repository: repository, currentPage: page) else {
-                return releases
-            }
-            pageURL = nextPage
-            page += 1
         }
+        checkRequest = request
+        defer { checkRequest = nil }
+        let response = try await request.value
+        cachedFeed = response
+        return response.feed
     }
 
     private static func validate(_ response: URLResponse) throws {
@@ -185,27 +131,32 @@ public actor UpdateService {
         }
     }
 
-    private static func fetch(_ url: URL, session: URLSession, maximumSize: Int) async throws -> (Data, HTTPURLResponse) {
-        // Retry this page only; successful earlier pages remain part of the shared catalog request.
-        try await withNetworkRetries { try await fetchOnce(url, session: session, maximumSize: maximumSize) }
-    }
-
-    private static func fetchOnce(_ url: URL, session: URLSession, maximumSize: Int) async throws -> (Data, HTTPURLResponse) {
+    private static func fetchFeed(_ url: URL, session: URLSession, cached: FeedResponse?) async throws -> FeedResponse {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue(cached?.etag, forHTTPHeaderField: "If-None-Match")
         let (bytes, response) = try await session.bytes(for: request)
         defer { bytes.task.cancel() }
+        if let response = response as? HTTPURLResponse, response.statusCode == 304,
+           let cached, let etag = cached.etag {
+            // If-None-Match uses weak comparison; a 304 cannot validate another document.
+            func opaqueTag(_ tag: String) -> Substring { tag.hasPrefix("W/") ? tag.dropFirst(2) : tag[...] }
+            if let received = response.value(forHTTPHeaderField: "ETag"), opaqueTag(received) != opaqueTag(etag) {
+                throw UpdateError.invalidManifest
+            }
+            return cached
+        }
         try validate(response)
-        guard let response = response as? HTTPURLResponse else { throw UpdateError.invalidManifest }
         var data = Data()
         for try await byte in bytes {
             try Task.checkCancellation()
-            guard data.count < maximumSize else { throw UpdateError.invalidManifest }
+            guard data.count < 16_384 else { throw UpdateError.invalidManifest }
             data.append(byte)
         }
-        return (data, response)
+        let feed = try UpdateFeed(data: data, url: url)
+        let etag = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "ETag")
+        return FeedResponse(feed: feed, etag: etag?.isEmpty == false ? etag : nil)
     }
 
     private static func withNetworkRetries<Value>(_ operation: () async throws -> Value) async throws -> Value {
@@ -252,53 +203,6 @@ public actor UpdateService {
               [.timedOut, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost,
                .dnsLookupFailed, .notConnectedToInternet].contains(error.code) else { return nil }
         return backoff
-    }
-
-    private static func nextPageURL(from response: HTTPURLResponse,
-                                    repository: (owner: String, name: String), currentPage: Int) throws -> URL? {
-        guard let header = response.value(forHTTPHeaderField: "Link"), !header.isEmpty else { return nil }
-        var nextTargets: [String] = []
-        for rawLink in header.split(separator: ",") {
-            let link = rawLink.trimmingCharacters(in: .whitespacesAndNewlines)
-            let parameters = link.split(separator: ";")
-            let relations = parameters.compactMap { parameter -> String? in
-                let pair = parameter.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "=", maxSplits: 1)
-                guard pair.count == 2, pair[0].trimmingCharacters(in: .whitespacesAndNewlines) == "rel" else {
-                    return nil
-                }
-                return pair[1].trimmingCharacters(in: CharacterSet(charactersIn: " \t\""))
-            }
-            if relations.contains(where: { $0.split(whereSeparator: \.isWhitespace).contains("next") }) {
-                guard let open = link.firstIndex(of: "<"), let close = link[open...].firstIndex(of: ">"),
-                      close > open else { throw UpdateError.invalidManifest }
-                nextTargets.append(String(link[link.index(after: open)..<close]))
-            }
-        }
-        guard !nextTargets.isEmpty else { return nil }
-        guard nextTargets.count == 1,
-              let linkedURL = URL(string: nextTargets[0]),
-              let components = URLComponents(url: linkedURL, resolvingAgainstBaseURL: false),
-              components.scheme == "https", components.host == "api.github.com",
-              components.user == nil, components.password == nil, components.port == nil,
-              components.fragment == nil,
-              components.percentEncodedPath == "/repos/\(repository.owner)/\(repository.name)/releases",
-              let queryItems = components.queryItems, queryItems.count == 2,
-              Set(queryItems.compactMap(\.name)) == ["page", "per_page"],
-              let pageValue = queryItems.first(where: { $0.name == "page" })?.value,
-              let linkedPage = Int(pageValue), String(linkedPage) == pageValue,
-              linkedPage == currentPage + 1,
-              queryItems.first(where: { $0.name == "per_page" })?.value == "100" else {
-            throw UpdateError.invalidManifest
-        }
-
-        var safe = URLComponents()
-        safe.scheme = "https"
-        safe.host = "api.github.com"
-        safe.path = "/repos/\(repository.owner)/\(repository.name)/releases"
-        safe.queryItems = [URLQueryItem(name: "page", value: String(linkedPage)),
-                           URLQueryItem(name: "per_page", value: "100")]
-        guard let url = safe.url else { throw UpdateError.invalidManifest }
-        return url
     }
 }
 

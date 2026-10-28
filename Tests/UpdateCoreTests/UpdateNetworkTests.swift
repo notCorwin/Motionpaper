@@ -8,7 +8,7 @@ struct UpdateNetworkTests {
     @Test
     func concurrentChannelsShareTransientFailureRecovery() async throws {
         let fixture = try NetworkFixture(responses: [
-            .failure(.networkConnectionLost), .http(status: 503), .http(body: catalog),
+            .failure(.networkConnectionLost), .http(status: 503), .http(body: feed),
         ])
         defer { fixture.cleanUp() }
 
@@ -18,25 +18,12 @@ struct UpdateNetworkTests {
 
         #expect(results.0?.commit == networkCommit)
         #expect(results.1 == nil)
-        #expect(NetworkProtocol.requests.map(\.url) == Array(repeating: networkCatalogURL, count: 3))
-    }
-
-    @Test
-    func paginationRetriesOnlyTheFailedPage() async throws {
-        let pageTwo = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?page=2&per_page=100")!
-        let fixture = try NetworkFixture(responses: [
-            .http(body: Data("[]".utf8), headers: ["Link": "<\(pageTwo)>; rel=\"next\""]),
-            .http(status: 502), .http(body: catalog),
-        ])
-        defer { fixture.cleanUp() }
-
-        #expect(try await fixture.service.check()?.commit == networkCommit)
-        #expect(NetworkProtocol.requests.map(\.url) == [networkCatalogURL, pageTwo, pageTwo])
+        #expect(NetworkProtocol.requests.map(\.url) == Array(repeating: networkFeedURL, count: 3))
     }
 
     @Test(arguments: [304, 401, 403, 404, 422])
     func permanentHTTPFailuresAreNotRetried(status: Int) async throws {
-        let fixture = try NetworkFixture(responses: [.http(status: status), .http(body: catalog)])
+        let fixture = try NetworkFixture(responses: [.http(status: status), .http(body: feed)])
         defer { fixture.cleanUp() }
 
         await #expect(throws: UpdateError.self) { try await fixture.service.check() }
@@ -46,7 +33,7 @@ struct UpdateNetworkTests {
     @Test(arguments: ["120", "invalid", "-1", "inf"])
     func longOrInvalidServerRetryDelaysFailPromptly(retryAfter: String) async throws {
         let fixture = try NetworkFixture(responses: [
-            .http(status: 429, headers: ["Retry-After": retryAfter]), .http(body: catalog),
+            .http(status: 429, headers: ["Retry-After": retryAfter]), .http(body: feed),
         ])
         defer { fixture.cleanUp() }
 
@@ -57,7 +44,7 @@ struct UpdateNetworkTests {
     @Test
     func shortServerRetryDelayIsRespected() async throws {
         let fixture = try NetworkFixture(responses: [
-            .http(status: 429, headers: ["Retry-After": "2"]), .http(body: catalog),
+            .http(status: 429, headers: ["Retry-After": "2"]), .http(body: feed),
         ])
         defer { fixture.cleanUp() }
         let started = ContinuousClock.now
@@ -70,7 +57,7 @@ struct UpdateNetworkTests {
     @Test
     func retryBudgetIsBoundedAndAFreshCheckCanRecover() async throws {
         let fixture = try NetworkFixture(responses: [
-            .http(status: 500), .http(status: 502), .http(status: 504), .http(body: catalog),
+            .http(status: 500), .http(status: 502), .http(status: 504), .http(body: feed),
         ])
         defer { fixture.cleanUp() }
 
@@ -84,7 +71,7 @@ struct UpdateNetworkTests {
     func cancellationInterruptsBackoffAndAllowsAFreshRequest(downloading: Bool) async throws {
         let fixture = try NetworkFixture(responses: [
             .http(status: 503, headers: ["Retry-After": "30"]),
-            .http(body: downloading ? Data("abc".utf8) : catalog),
+            .http(body: downloading ? Data("abc".utf8) : feed),
         ])
         defer { fixture.cleanUp() }
         let request = Task {
@@ -114,8 +101,8 @@ struct UpdateNetworkTests {
     }
 
     @Test
-    func malformedCatalogIsNotRetried() async throws {
-        let fixture = try NetworkFixture(responses: [.http(body: Data("invalid".utf8)), .http(body: catalog)])
+    func malformedFeedIsNotRetried() async throws {
+        let fixture = try NetworkFixture(responses: [.http(body: Data("invalid".utf8)), .http(body: feed)])
         defer { fixture.cleanUp() }
 
         await #expect(throws: UpdateError.self) { try await fixture.service.check() }
@@ -153,13 +140,12 @@ struct UpdateNetworkTests {
     }
 }
 
-private let networkCatalogURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100")!
+private let networkFeedURL = URL(string: "https://raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json")!
 private let networkCommit = String(repeating: "b", count: 40)
 private let networkDigest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-private let catalog = Data("""
-[{"tag_name":"Autobuild-\(networkCommit)","published_at":"2026-10-28T00:00:00Z","draft":false,"prerelease":false,
-"assets":[{"name":"Motionpaper-bbbbbbbbbbbb.dmg","state":"uploaded","size":3,"digest":"sha256:\(networkDigest)",
-"browser_download_url":"https://github.com/notCorwin/Motionpaper/releases/download/Autobuild-\(networkCommit)/Motionpaper-bbbbbbbbbbbb.dmg"}]}]
+private let feed = Data("""
+{"autobuild":{"commit":"\(networkCommit)","publishedAt":"2026-10-28T00:00:00Z","size":3,"sha256":"\(networkDigest)",
+"downloadURL":"https://github.com/notCorwin/Motionpaper/releases/download/Autobuild/Motionpaper-bbbbbbbbbbbb.dmg"}}
 """.utf8)
 
 private func networkManifest() -> UpdateManifest {
@@ -180,7 +166,7 @@ private struct NetworkFixture {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [NetworkProtocol.self]
         session = URLSession(configuration: configuration)
-        service = UpdateService(releaseURL: networkCatalogURL, currentCommit: "other", directory: directory, session: session)
+        service = UpdateService(feedURL: networkFeedURL, currentCommit: "other", directory: directory, session: session)
     }
 
     func cleanUp() {

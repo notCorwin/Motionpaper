@@ -50,7 +50,7 @@ final class UpdateController {
            let url = URL(string: address),
            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
             let directory = caches.appendingPathComponent("local.motionpaper.app/Updates", isDirectory: true)
-            service = UpdateService(releaseURL: url, currentCommit: commit,
+            service = UpdateService(feedURL: url, currentCommit: commit,
                                     currentVersion: channel == .stable ? bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String : nil,
                                     channel: channel, directory: directory)
         } else {

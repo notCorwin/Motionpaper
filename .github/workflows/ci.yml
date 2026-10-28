@@ -242,7 +242,7 @@ jobs:
           name: motionpaper-release-${{ needs.build.outputs.commit }}
           path: dist
 
-      - name: Publish release and remove obsolete commit releases
+      - name: Publish release and static update feed
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}

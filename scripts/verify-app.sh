@@ -42,9 +42,9 @@ case "$motionpaper_repository" in
     */*) ;;
     *) echo "error: invalid MotionpaperRepositoryURL metadata" >&2; exit 1 ;;
 esac
-motionpaper_expected_update_url="https://api.github.com/repos/$motionpaper_repository/releases?per_page=100"
+motionpaper_expected_update_url="https://raw.githubusercontent.com/$motionpaper_repository/updates/update.json"
 [ "$motionpaper_update_url" = "$motionpaper_expected_update_url" ] || {
-    echo "error: MotionpaperUpdateURL does not match the release channel source" >&2
+    echo "error: MotionpaperUpdateURL does not match the static update feed" >&2
     exit 1
 }
 

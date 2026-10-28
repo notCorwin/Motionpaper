@@ -402,9 +402,9 @@ extension AppDelegate {
         try require(url.scheme == "https" && url.host == "github.com" && url.pathComponents.count == 3)
         let owner = url.pathComponents[1]
         let repository = url.pathComponents[2]
-        let releasesURL = "https://api.github.com/repos/\(owner)/\(repository)/releases?per_page=100"
+        let feedURL = "https://raw.githubusercontent.com/\(owner)/\(repository)/updates/update.json"
         try require(Bundle.main.object(forInfoDictionaryKey: "MotionpaperUpdateURL") as? String
-                    == releasesURL)
+                    == feedURL)
     }
 
     private func verifyUpdateMenu() throws {
@@ -506,21 +506,11 @@ extension AppDelegate {
         }
 
         let commit = String(repeating: "a", count: 40)
-        let data = try JSONSerialization.data(withJSONObject: [
-            "tag_name": "Autobuild-\(commit)",
-            "draft": false,
-            "prerelease": false,
-            "published_at": "2026-10-25T00:00:00Z",
-            "assets": [[
-                "name": "Motionpaper-aaaaaaaaaaaa.dmg",
-                "state": "uploaded",
-                "browser_download_url": "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild-\(commit)/Motionpaper-aaaaaaaaaaaa.dmg",
-                "size": 1,
-                "digest": "sha256:\(String(repeating: "b", count: 64))",
-            ]],
-        ])
-        let releaseURL = URL(string: "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100")!
-        let manifest = try UpdateManifest.decode(data, releaseURL: releaseURL)
+        let manifest = UpdateManifest(
+            commit: commit, publishedAt: Date(),
+            downloadURL: URL(string: "https://github.com/notCorwin/Motionpaper/releases/download/Autobuild/Motionpaper-aaaaaaaaaaaa.dmg")!,
+            sha256: String(repeating: "b", count: 64), size: 1
+        )
         statusItem.update(UpdateController.State.available(manifest))
         let installTitle = "更新并重新启动（aaaaaaaaaaaa）"
         let availableItem = try requireUpdateItem(installTitle)

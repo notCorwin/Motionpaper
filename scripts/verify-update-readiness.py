@@ -178,12 +178,12 @@ def verify_channel_menus(root, binary, fixture_directory):
         information = application / "Contents/Info.plist"
         with information.open("rb") as stream:
             metadata = plistlib.load(stream)
-        stable_url = "https://api.github.com/repos/notCorwin/Motionpaper/releases?per_page=100"
+        feed_url = "https://raw.githubusercontent.com/notCorwin/Motionpaper/updates/update.json"
         metadata.update(
             CFBundleShortVersionString="1.0.0",
             MotionpaperReleaseChannel=channel,
             MotionpaperRepositoryURL="https://github.com/notCorwin/Motionpaper",
-            MotionpaperUpdateURL=stable_url,
+            MotionpaperUpdateURL=feed_url,
         )
         with information.open("wb") as stream:
             plistlib.dump(metadata, stream)

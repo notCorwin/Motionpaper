@@ -1,6 +1,7 @@
-"""Mocked contract tests for stable and Autobuild release publishing."""
+"""End-to-end publisher contract tests; all GitHub operations use a local mock."""
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -9,1263 +10,544 @@ import subprocess
 import tempfile
 import unittest
 
-
 PUBLISHER = Path(__file__).with_name("publish-release.sh")
-REPOSITORY = "notCorwin/Motionpaper"
-RELEASE_BASE = f"https://github.com/{REPOSITORY}/releases/download"
-
+REPOSITORY = "owner/repo"
+BASE = f"https://github.com/{REPOSITORY}/releases/download"
+DATE = "2026-01-02T03:04:05Z"
 
 MOCK_GH = r'''#!/usr/bin/env python3
 import base64
-import datetime
+import hashlib
 import json
 import os
-import re
-import sys
 from pathlib import Path
+import sys
+from urllib.parse import unquote
 
-state_path = Path(os.environ["MOCK_GH_STATE"])
-state = json.loads(state_path.read_text())
-args = sys.argv[1:]
-state.setdefault("calls", []).append(args)
+path = Path(os.environ['MOCK_GH_STATE'])
+s = json.loads(path.read_text())
+a = sys.argv[1:]
+s.setdefault('calls', []).append(a)
 
 def save():
-    state_path.write_text(json.dumps(state, sort_keys=True))
+    path.write_text(json.dumps(s))
 
-def fail(message):
+def fail(message, status=400):
     save()
-    print("mock gh: " + message, file=sys.stderr)
-    raise SystemExit(2)
+    print(f'gh: {message} (HTTP {status})', file=sys.stderr)
+    raise SystemExit(1)
 
-def emit(value):
-    if isinstance(value, str):
-        print(value)
-    else:
-        print(json.dumps(value))
+def out(value):
+    print(value if isinstance(value, str) else json.dumps(value))
 
-def api_arguments(values):
-    method = "GET"
-    jq = None
-    path = None
-    forms = {}
-    index = 0
-    while index < len(values):
-        value = values[index]
-        if value == "--method":
-            index += 1
-            method = values[index]
-        elif value == "--jq":
-            index += 1
-            jq = values[index]
-        elif value in ("-f", "-F"):
-            index += 1
-            key, form_value = values[index].split("=", 1)
-            forms[key] = form_value
-        elif value == "--input":
-            index += 1
-            body = json.loads(Path(values[index]).read_text())
-            for key, form_value in body.items():
-                forms[key] = str(form_value).lower() if isinstance(form_value, bool) else form_value
-        elif value == "--paginate":
-            pass
-        elif value.startswith("-"):
-            fail("unexpected API option " + value)
-        elif path is None:
-            path = value
-        else:
-            fail("unexpected API argument " + value)
-        index += 1
-    return method, path, jq, forms
+def new_sha():
+    s['serial'] = s.get('serial', 0) + 1
+    return hashlib.sha1(str(s['serial']).encode()).hexdigest()
+
+def new_tree(content):
+    blob, tree = new_sha(), new_sha()
+    s['blobs'][blob] = {'encoding': 'base64', 'content': base64.b64encode(content.encode()).decode()}
+    s['trees'][tree] = {'truncated': False, 'tree': [{'path': 'update.json', 'mode': '100644', 'type': 'blob', 'sha': blob}]}
+    return tree
 
 def find_release(tag=None, release_id=None):
-    for release in state["releases"]:
-        if tag is not None and release["tag_name"] == tag:
-            return release
-        if release_id is not None and str(release["id"]) == str(release_id):
-            return release
-    return None
+    return next((r for r in s['releases'] if (tag is not None and r['tag_name'] == tag) or
+                 (release_id is not None and str(r['id']) == str(release_id))), None)
+
+def api_args(values):
+    method, route, jq, payload, slurp = 'GET', None, None, {}, False
+    i = 0
+    while i < len(values):
+        value = values[i]
+        if value == '--method':
+            i += 1; method = values[i]
+        elif value == '--jq':
+            i += 1; jq = values[i]
+        elif value in ('-f', '-F'):
+            i += 1
+            key, v = values[i].split('=', 1)
+            payload[key] = (v == 'true') if value == '-F' and v in ('true', 'false') else v
+        elif value == '--input':
+            i += 1
+            payload.update(json.loads(sys.stdin.read() if values[i] == '-' else Path(values[i]).read_text()))
+        elif value == '--slurp':
+            slurp = True
+        elif value == '--paginate':
+            pass
+        elif value.startswith('-'):
+            fail('unexpected option ' + value)
+        elif route is None:
+            route = value
+        else:
+            fail('unexpected API argument ' + value)
+        i += 1
+    prefix = 'repos/' + s['repository'] + '/'
+    if not route or not route.startswith(prefix):
+        fail('unexpected route ' + str(route))
+    return method, route[len(prefix):], jq, payload, slurp
 
 def api():
-    method, path, jq, forms = api_arguments(args[1:])
-    prefix = "repos/" + state["repository"] + "/"
-    if not path or not path.startswith(prefix):
-        fail("unexpected API path " + str(path))
-    route = path[len(prefix):]
-
-    if method == "GET" and route.startswith("branches/"):
-        branch = route[len("branches/"):]
-        value = state["branches"].get(branch)
-        if value is None:
-            fail("missing branch " + branch)
-        emit(value if jq == ".commit.sha" else {"commit": {"sha": value}})
-    elif method == "GET" and route == "releases/latest":
-        tag = state.get("latest")
-        if not tag:
-            fail("no latest release")
-        emit(tag if jq == ".tag_name" else {"tag_name": tag})
-    elif method == "GET" and route.startswith("git/ref/tags/"):
-        tag = route[len("git/ref/tags/"):]
-        ref = state["tags"].get(tag)
-        if ref is None:
-            fail("missing tag " + tag)
-        emit({"object": ref})
-    elif method == "GET" and route.startswith("git/tags/"):
-        tag_object = route[len("git/tags/"):]
-        obj = state.get("tag_objects", {}).get(tag_object)
-        if obj is None:
-            fail("missing annotated tag object " + tag_object)
-        emit({"object": obj})
-    elif method == "POST" and route == "git/refs":
-        ref = forms["ref"]
-        if not ref.startswith("refs/tags/"):
-            fail("expected a tag reference")
-        tag = ref[len("refs/tags/"):]
-        if tag in state["tags"]:
-            fail("tag already exists")
-        state["tags"][tag] = {"type": "commit", "sha": forms["sha"]}
-        save()
-        emit({"object": state["tags"][tag]})
-    elif method == "GET" and route == "releases?per_page=100":
-        releases = state["releases"]
-        if jq and "@tsv" in jq:
-            for release in releases:
-                print("\t".join([
-                    str(release["id"]), release["tag_name"],
-                    release.get("target_commitish", ""), str(release.get("draft", False)).lower(),
-                ]))
-        elif jq and "select(.tag_name ==" in jq:
-            match = re.search(r'select\(\.tag_name == "([^"]+)"\)', jq)
-            wanted = match.group(1) if match else ""
-            for release in releases:
-                if release["tag_name"] == wanted:
-                    emit(release)
-        elif state.get("paginate_releases") and jq is None:
-            midpoint = max(1, len(releases) // 2)
-            emit(releases[:midpoint])
-            emit(releases[midpoint:])
-        else:
-            emit(releases)
-    elif method == "POST" and route == "releases":
-        tag = forms["tag_name"]
-        commit = forms["target_commitish"]
-        state["last_release_request"] = forms
-        release_id = max([int(r["id"]) for r in state["releases"]] + [0]) + 1
-        release = {
-            "id": release_id,
-            "tag_name": tag,
-            "target_commitish": commit,
-            "name": forms.get("name", ""),
-            "body": forms.get("body", ""),
-            "draft": forms.get("draft") == "true",
-            "published_at": None,
-            "assets": [],
-        }
-        state["releases"].append(release)
-        if forms.get("make_latest") == "true":
-            state["latest"] = tag
-        save()
-        emit(release)
-    elif method == "GET" and route.startswith("releases/tags/"):
-        tag = route[len("releases/tags/"):]
-        release = find_release(tag=tag)
-        if release is None:
-            fail("missing release tag " + tag)
-        emit(release)
-    elif route.startswith("releases/") and "/assets/" not in route:
-        release_id = route[len("releases/"):]
-        release = find_release(release_id=release_id)
-        if release is None:
-            fail("missing release " + release_id)
-        if method == "GET":
-            failures = state.setdefault("release_read_failures", {})
-            if failures.get(release_id, 0) > 0:
-                failures[release_id] -= 1
-                fail("injected release read failure")
-            emit(release)
-        elif method == "PATCH":
-            if "draft" in forms:
-                release["draft"] = forms["draft"] == "true"
-                if not release["draft"] and not release.get("published_at"):
-                    release["published_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                if not release["draft"]:
-                    for item in release["assets"]:
-                        item["browser_download_url"] = f"https://github.com/{state['repository']}/releases/download/{release['tag_name']}/{item['name']}"
-            if forms.get("make_latest") == "true":
-                hook = state.get("latest_patch_hook")
-                if (
-                    hook and not hook.get("fired")
-                    and release["tag_name"] == hook["patch_tag"]
-                ):
-                    injected = hook["release"]
-                    state["releases"].append(injected)
-                    state["tags"][injected["tag_name"]] = {
-                        "type": "commit", "sha": injected["target_commitish"],
-                    }
-                    hook["fired"] = True
-                    state["latest_patch_hook_fired"] = injected["tag_name"]
-                state["latest"] = release["tag_name"]
-            hook = state.get("stable_publish_hook")
-            if "draft" in forms and hook and release["tag_name"] == hook["stable_publish_tag"]:
-                stable_before_hook = next(
-                    (a for a in release["assets"] if a["name"] == "update.json"), None,
-                )
-                if stable_before_hook is not None:
-                    state["stable_publish_hook_result"] = {
-                        "stable_update_before_hook": stable_before_hook["content"],
-                    }
-                state["releases"] = [
-                    item for item in state["releases"]
-                    if item["tag_name"] != hook["remove_autobuild_tag"]
-                ]
-                state["tags"].pop(hook["remove_autobuild_tag"], None)
-                autobuild = hook["autobuild_release"]
-                state["releases"].append(autobuild)
-                state["tags"][autobuild["tag_name"]] = {
-                    "type": "commit", "sha": autobuild["target_commitish"],
-                }
-                stable_target = next(
-                    item for item in state["releases"]
-                    if item["tag_name"] == hook["sync_stable_tag"]
-                )
-                auto_update = next(a for a in autobuild["assets"] if a["name"] == "update.json")
-                stable_update = dict(auto_update)
-                stable_update["id"] = max(
-                    [int(a["id"]) for item in state["releases"] for a in item["assets"]] + [0]
-                ) + 1
-                stable_update["browser_download_url"] = (
-                    f"https://github.com/{state['repository']}/releases/download/"
-                    f"{hook['sync_stable_tag']}/update.json"
-                )
-                stable_target["assets"] = [
-                    a for a in stable_target["assets"] if a["name"] != "update.json"
-                ] + [stable_update]
-            save()
-            emit(release)
-        elif method == "DELETE":
-            state["releases"] = [r for r in state["releases"] if str(r["id"]) != release_id]
-            save()
-        else:
-            fail("unsupported release method " + method)
-    elif route.startswith("releases/assets/"):
-        asset_id = route[len("releases/assets/"):]
-        found_release = None
-        found_asset = None
-        for release in state["releases"]:
-            for item in release["assets"]:
-                if str(item["id"]) == asset_id:
-                    found_release = release
-                    found_asset = item
-                    break
-            if found_asset is not None:
-                break
-        if found_asset is None:
-            fail("missing release asset " + asset_id)
-        if method == "PATCH":
-            new_name = forms["name"]
-            failures = state.setdefault("asset_rename_failures", {})
-            if failures.get(new_name, 0) > 0:
-                failures[new_name] -= 1
-                if state.get("read_failure_after_rename_failure"):
-                    state.setdefault("release_read_failures", {})[str(found_release["id"])] = 1
-                save()
-                fail("injected asset rename failure for " + new_name)
-            if any(item is not found_asset and item["name"] == new_name for item in found_release["assets"]):
-                fail("duplicate release asset name " + new_name)
-            found_asset["name"] = new_name
-            download_tag = "untagged-draft-fixture" if found_release["draft"] else found_release["tag_name"]
-            found_asset["browser_download_url"] = (
-                f"https://github.com/{state['repository']}/releases/download/{download_tag}/{new_name}"
-            )
-            response_failures = state.setdefault("asset_rename_response_failures", {})
-            if response_failures.get(new_name, 0) > 0:
-                response_failures[new_name] -= 1
-                fail("injected lost asset rename response for " + new_name)
-            save()
-            emit(found_asset)
-        elif method == "DELETE":
-            found_release["assets"] = [item for item in found_release["assets"] if str(item["id"]) != asset_id]
-            save()
-        else:
-            fail("unsupported release asset method " + method)
-    elif method == "DELETE" and route.startswith("git/refs/tags/"):
-        tag = route[len("git/refs/tags/"):]
-        state["tags"].pop(tag, None)
-        save()
+    method, route, jq, p, slurp = api_args(a[1:])
+    if method == 'GET' and route.startswith('branches/'):
+        if s.get('fail_branch'):
+            fail('injected branch API failure', 500)
+        sha = s['branches'].get(unquote(route[len('branches/'):]))
+        if sha is None: fail('missing branch', 404)
+        out(sha if jq == '.commit.sha' else {'commit': {'sha': sha}})
+    elif method == 'GET' and route == 'releases?per_page=100':
+        out([s['releases']] if slurp else s['releases'])
+    elif method == 'GET' and route == 'releases/latest':
+        if not s.get('latest'): fail('no latest release', 404)
+        out(s['latest'] if jq == '.tag_name' else {'tag_name': s['latest']})
+    elif method == 'GET' and route.startswith('git/ref/tags/'):
+        tag = route[len('git/ref/tags/'):]
+        if s.get('fail_tag_read'): fail('injected tag API failure', 500)
+        obj = s['tags'].get(tag)
+        if not obj: fail('missing tag', 404)
+        out({'object': obj})
+    elif method == 'GET' and route.startswith('git/tags/'):
+        obj = s.get('tag_objects', {}).get(route[len('git/tags/'):])
+        if not obj: fail('missing tag object', 404)
+        out({'object': obj})
+    elif method == 'GET' and route == 'git/ref/heads/updates':
+        if not s.get('updates'): fail('missing updates branch', 404)
+        obj = {'type': 'commit', 'sha': s['updates']}
+        out(s['updates'] if jq == '.object.sha' else {'object': obj})
+    elif method == 'POST' and route == 'git/refs':
+        ref = p['ref']
+        if ref.startswith('refs/tags/'):
+            tag = ref[len('refs/tags/'):]
+            if tag in s['tags']: fail('tag exists', 422)
+            s['tags'][tag] = {'type': 'commit', 'sha': p['sha']}
+        elif ref == 'refs/heads/updates':
+            if s.get('updates'): fail('branch exists', 422)
+            s['updates'] = p['sha']
+        else: fail('unknown ref')
+        out({'object': {'type': 'commit', 'sha': p['sha']}})
+    elif method == 'PATCH' and route.startswith('git/refs/tags/'):
+        tag = route[len('git/refs/tags/'):]
+        if tag not in s['tags'] or p.get('force') is not True: fail('bad tag update')
+        s['tags'][tag] = {'type': 'commit', 'sha': p['sha']}
+        if s.get('branch_after_tag_move'): s['branches']['main'] = s.pop('branch_after_tag_move')
+        out({'object': s['tags'][tag]})
+    elif method == 'PATCH' and route == 'git/refs/heads/updates':
+        if p.get('force') is not False: fail('updates write must be non-force')
+        if s['commits'][p['sha']]['parents'] != [s.get('updates')]: fail('non-fast-forward', 422)
+        s['updates'] = p['sha']
+        out({'object': {'type': 'commit', 'sha': p['sha']}})
+    elif method == 'POST' and route == 'git/trees':
+        entries = p['tree']
+        if len(entries) != 1 or (entries[0]['path'], entries[0]['mode'], entries[0]['type']) != ('update.json', '100644', 'blob'):
+            fail('invalid data tree')
+        out({'sha': new_tree(entries[0]['content'])})
+    elif method == 'POST' and route == 'git/commits':
+        sha = new_sha()
+        s['commits'][sha] = {'tree': {'sha': p['tree']}, 'parents': p['parents']}
+        out({'sha': sha})
+    elif method == 'GET' and route.startswith('git/commits/'):
+        out(s['commits'][route[len('git/commits/'):]])
+    elif method == 'GET' and route.startswith('git/trees/'):
+        out(s['trees'][route[len('git/trees/'):]])
+    elif method == 'GET' and route.startswith('git/blobs/'):
+        out(s['blobs'][route[len('git/blobs/'):]])
+    elif method == 'POST' and route == 'releases':
+        if find_release(tag=p['tag_name']): fail('release exists', 422)
+        release_id = max([r['id'] for r in s['releases']] + [0]) + 1
+        release = {'id': release_id, 'tag_name': p['tag_name'], 'target_commitish': p['target_commitish'],
+                   'name': p['name'], 'body': p['body'], 'draft': p['draft'], 'prerelease': p['prerelease'],
+                   'published_at': None, 'assets': []}
+        s['releases'].append(release)
+        out(release)
+    elif route.startswith('releases/') and '/assets/' not in route:
+        release = find_release(release_id=route[len('releases/'):])
+        if not release: fail('missing release', 404)
+        if method == 'GET':
+            out(release)
+        elif method == 'PATCH':
+            if release['tag_name'] == 'Autobuild' and 'body' in p and s.get('fail_auto_patch'):
+                s['fail_auto_patch'] = False
+                fail('injected Autobuild metadata failure', 500)
+            # GitHub ignores target_commitish when the tag already exists.
+            for key in ('name', 'body', 'draft'):
+                if key in p: release[key] = p[key]
+            if release['draft'] is False and not release['published_at']:
+                release['published_at'] = '2026-01-02T03:04:05Z'
+            if release['draft'] is False:
+                for asset in release['assets']:
+                    asset['browser_download_url'] = f"https://github.com/{s['repository']}/releases/download/{release['tag_name']}/{asset['name']}"
+            if p.get('make_latest') == 'true': s['latest'] = release['tag_name']
+            out(release)
+        else: fail('unsupported release method')
     else:
-        fail("unsupported API request " + method + " " + route)
-
+        fail('unexpected API request ' + method + ' ' + route)
     save()
 
-if not args:
-    fail("missing command")
-if args[0] == "api":
+if a[0] == 'api':
     api()
-elif args[0] == "release" and len(args) > 1 and args[1] == "upload":
-    tag = args[2]
-    release = find_release(tag=tag)
-    if release is None:
-        fail("upload to missing release " + tag)
-    paths = []
-    index = 3
-    while index < len(args):
-        value = args[index]
-        if value in ("--repo", "--pattern", "--dir"):
-            index += 2
-        elif value == "--clobber":
-            index += 1
-        else:
-            paths.append(Path(value))
-            index += 1
-    for path in paths:
-        content = path.read_bytes()
-        download_tag = "untagged-draft-fixture" if release["draft"] else tag
-        release["assets"] = [a for a in release["assets"] if a["name"] != path.name]
-        uploaded_asset = {
-            "id": max([int(a["id"]) for r in state["releases"] for a in r["assets"]] + [0]) + 1,
-            "name": path.name,
-            "size": len(content),
-            "digest": "sha256:" + __import__("hashlib").sha256(content).hexdigest(),
-            "state": "uploaded",
-            "browser_download_url": f"https://github.com/{state['repository']}/releases/download/{download_tag}/{path.name}",
-            "content": base64.b64encode(content).decode("ascii"),
-        }
-        if path.name == state.get("upload_metadata_mismatch_name"):
-            uploaded_asset["size"] += 1
-        release["assets"].append(uploaded_asset)
-        save()
-        fail_prefix = state.get("upload_failure_name_prefix", "")
-        fail_name = state.get("upload_failure_name", "")
-        if not state.get("upload_failure_fired") and (
-            (fail_prefix and path.name.startswith(fail_prefix)) or path.name == fail_name
-        ):
-            state["upload_failure_fired"] = True
-            save()
-            fail("injected upload failure after " + path.name)
-elif args[0] == "release" and len(args) > 1 and args[1] == "download":
-    tag = args[2]
-    options = args[3:]
-    pattern = options[options.index("--pattern") + 1]
-    destination = Path(options[options.index("--dir") + 1])
-    release = find_release(tag=tag)
-    if release is None:
-        fail("download from missing release " + tag)
-    asset = next((a for a in release["assets"] if a["name"] == pattern), None)
-    if asset is None:
-        fail("missing download asset " + pattern)
-    destination.mkdir(parents=True, exist_ok=True)
-    if (destination / pattern).exists() and "--clobber" not in options:
-        fail("download destination already exists")
-    content = base64.b64decode(asset["content"])
-    if pattern == state.get("download_tamper_name") and not state.get("download_tamper_fired"):
-        tampered = bytearray(content)
-        if tampered:
-            tampered[0] ^= 1
-        else:
-            tampered.extend(b"tampered")
-        content = bytes(tampered)
-        state["download_tamper_fired"] = True
-    (destination / pattern).write_bytes(content)
+elif a[:2] == ['release', 'upload']:
+    release = find_release(tag=a[2])
+    if release is None: fail('missing release', 404)
+    item_path = Path(a[3])
+    if any(item['name'] == item_path.name for item in release['assets']): fail('asset exists', 422)
+    if s.get('upload_fail') == 'before':
+        s['upload_fail'] = None
+        fail('injected upload failure', 500)
+    content = item_path.read_bytes()
+    tag = 'untagged-draft' if release['draft'] else release['tag_name']
+    asset = {'id': max([item['id'] for r in s['releases'] for item in r['assets']] + [0]) + 1,
+             'name': item_path.name, 'state': 'uploaded', 'size': len(content),
+             'digest': 'sha256:' + hashlib.sha256(content).hexdigest(), 'created_at': '2026-01-02T03:04:05Z',
+             'content': base64.b64encode(content).decode(),
+             'browser_download_url': f"https://github.com/{s['repository']}/releases/download/{tag}/{item_path.name}"}
+    if s.get('wrong_upload_size'): asset['size'] += 1
+    release['assets'].append(asset)
+    if s.get('branch_after_upload'): s['branches']['main'] = s.pop('branch_after_upload')
+    if s.get('tag_after_upload'): s['tags']['Autobuild']['sha'] = s.pop('tag_after_upload')
+    if s.get('upload_fail') == 'after':
+        s['upload_fail'] = None
+        fail('injected upload failure', 500)
+    save()
+elif a[:2] == ['release', 'download']:
+    release = find_release(tag=a[2])
+    name = a[a.index('--pattern') + 1]
+    dest = Path(a[a.index('--dir') + 1])
+    asset = next((item for item in release['assets'] if item['name'] == name), None)
+    if asset is None: fail('missing asset', 404)
+    content = base64.b64decode(asset['content'])
+    if s.get('tamper_download'): content += b'tampered'
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / name).write_bytes(content)
     save()
 else:
-    fail("unsupported command " + " ".join(args))
+    fail('unsupported command ' + ' '.join(a))
 '''
 
 
-def asset(tag, name, content):
-    digest = hashlib.sha256(content).hexdigest()
+def asset(tag, name, content=b"fixture DMG"):
     return {
-        "id": 1,
-        "name": name,
-        "size": len(content),
-        "digest": f"sha256:{digest}",
-        "state": "uploaded",
-        "browser_download_url": f"{RELEASE_BASE}/{tag}/{name}",
-        "content": base64.b64encode(content).decode("ascii"),
+        "id": 1, "name": name, "state": "uploaded", "size": len(content),
+        "digest": "sha256:" + hashlib.sha256(content).hexdigest(), "created_at": DATE,
+        "content": base64.b64encode(content).decode(), "browser_download_url": f"{BASE}/{tag}/{name}",
     }
 
 
-def released(tag, commit, release_id, date, channel, version=None):
-    if channel == "stable":
-        dmg_name = f"Motionpaper-v{version}.dmg"
-    else:
-        dmg_name = f"Motionpaper-{commit[:12]}.dmg"
-    dmg_content = f"fixture DMG for {tag}".encode()
-    release_assets = [asset(tag, dmg_name, dmg_content)]
-    if channel == "autobuild":
-        manifest = {
-            "commit": commit,
-            "publishedAt": date,
-            "downloadURL": f"{RELEASE_BASE}/{tag}/{dmg_name}",
-            "sha256": hashlib.sha256(dmg_content).hexdigest(),
-            "size": len(dmg_content),
-        }
-        release_assets.append(asset(tag, "update.json", json.dumps(manifest, sort_keys=True).encode()))
-    for index, release_asset in enumerate(release_assets, start=1):
-        release_asset["id"] = release_id * 10 + index
-    return {
-        "id": release_id,
-        "tag_name": tag,
-        "target_commitish": commit,
-        "draft": False,
-        "prerelease": False,
-        "published_at": date,
-        "assets": release_assets,
-    }
+def released(channel, commit, release_id=1, version="1.0.0", draft=False):
+    tag = "Autobuild" if channel == "autobuild" else "v" + version
+    name = f"Motionpaper-{commit[:12]}.dmg" if channel == "autobuild" else f"Motionpaper-{tag}.dmg"
+    item = asset(tag, name)
+    item["id"] = release_id * 10
+    if draft:
+        item["browser_download_url"] = f"{BASE}/untagged-draft/{name}"
+    return {"id": release_id, "tag_name": tag, "target_commitish": commit, "name": tag, "body": "body",
+            "draft": draft, "prerelease": False, "published_at": None if draft else DATE, "assets": [item]}
+
+
+def state_for(commit):
+    return {"repository": REPOSITORY, "branches": {"main": commit}, "tags": {}, "releases": [],
+            "latest": None, "updates": None, "commits": {}, "trees": {}, "blobs": {}, "calls": []}
+
+
+def add_release(state, item):
+    state["releases"].append(item)
+    state["tags"][item["tag_name"]] = {"type": "commit", "sha": item["target_commitish"]}
+
+
+def read_feed(state):
+    commit = state["commits"][state["updates"]]
+    tree = state["trees"][commit["tree"]["sha"]]
+    blob = state["blobs"][tree["tree"][0]["sha"]]
+    return json.loads(base64.b64decode(blob["content"]))
 
 
 class PublishReleaseTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        self.dist = self.root / "dist"
-        self.dist.mkdir()
-        self.bin = self.root / "bin"
-        self.bin.mkdir()
-        mock = self.bin / "gh"
-        mock.write_text(MOCK_GH, encoding="utf-8")
-        mock.chmod(0o755)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "dist").mkdir()
+        (self.root / "bin").mkdir()
+        gh = self.root / "bin" / "gh"
+        gh.write_text(MOCK_GH, encoding="utf-8")
+        gh.chmod(0o755)
         self.state_path = self.root / "state.json"
 
-    def run_publish(self, state, commit, channel, version, dmg_content=b"package DMG fixture"):
-        if channel == "stable":
-            dmg_name = f"Motionpaper-v{version}.dmg"
-        else:
-            dmg_name = f"Motionpaper-{commit[:12]}.dmg"
-        (self.dist / dmg_name).write_bytes(dmg_content)
-        state["repository"] = REPOSITORY
-        state.setdefault("calls", [])
+    def publish(self, state, commit, channel="autobuild", version="1.0.0", content=b"new package"):
+        name = f"Motionpaper-{commit[:12]}.dmg" if channel == "autobuild" else f"Motionpaper-v{version}.dmg"
+        (self.root / "dist" / name).write_bytes(content)
         self.state_path.write_text(json.dumps(state), encoding="utf-8")
-        environment = os.environ.copy()
-        environment.update({
-            "PATH": f"{self.bin}:{environment['PATH']}",
-            "MOCK_GH_STATE": str(self.state_path),
-            "GH_TOKEN": "mock-token",
-            "GITHUB_REPOSITORY": REPOSITORY,
-            "RELEASE_COMMIT": commit,
-            "DEFAULT_BRANCH": "master",
-            "MOTIONPAPER_RELEASE_CHANNEL": channel,
-            "MOTIONPAPER_VERSION": version,
-        })
-        result = subprocess.run(
-            ["bash", str(PUBLISHER)], cwd=self.root, env=environment,
-            text=True, capture_output=True, check=False,
-        )
-        return result, json.loads(self.state_path.read_text(encoding="utf-8"))
+        env = os.environ.copy()
+        env.update({"PATH": f"{self.root / 'bin'}:{env['PATH']}", "MOCK_GH_STATE": str(self.state_path),
+                    "GH_TOKEN": "mock", "GITHUB_REPOSITORY": REPOSITORY, "RELEASE_COMMIT": commit,
+                    "DEFAULT_BRANCH": "main", "MOTIONPAPER_RELEASE_CHANNEL": channel, "MOTIONPAPER_VERSION": version,
+                    "PYTHONDONTWRITEBYTECODE": "1"})
+        result = subprocess.run(["bash", str(PUBLISHER)], cwd=self.root, env=env, text=True, capture_output=True)
+        return result, json.loads(self.state_path.read_text())
 
-    def autobuild_sync_state(self, autobuild_commit):
-        stable_tag = "v1.0.0"
-        stable_commit = "f" * 40
-        stable = released(stable_tag, stable_commit, 101, "2026-01-01T00:00:00Z", "stable", "1.0.0")
-        autobuild_tag = "Autobuild-" + autobuild_commit
-        autobuild = released(
-            autobuild_tag, autobuild_commit, 102, "2026-02-01T00:00:00Z", "autobuild"
-        )
-        old_commit = "e" * 40
-        old_manifest = json.dumps({
-            "commit": old_commit,
-            "publishedAt": "2026-01-15T00:00:00Z",
-            "downloadURL": f"{RELEASE_BASE}/Autobuild-{old_commit}/Motionpaper-{old_commit[:12]}.dmg",
-            "sha256": "0" * 64,
-            "size": 10,
-        }, sort_keys=True).encode()
-        old_asset = asset(stable_tag, "update.json", old_manifest)
-        old_asset["id"] = stable["id"] * 10 + 2
-        stable["assets"].append(old_asset)
-        state = {
-            "branches": {"master": autobuild_commit},
-            "tags": {
-                stable_tag: {"type": "commit", "sha": stable_commit},
-                autobuild_tag: {"type": "commit", "sha": autobuild_commit},
-            },
-            "releases": [stable, autobuild],
-            "latest": autobuild_tag,
-        }
-        return state, old_asset["content"], autobuild["assets"][1]["content"]
+    def assert_success(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_stable_draft_retry_reuses_uploaded_dmg_after_rebuild_changes_bytes(self):
+    def test_first_and_repeated_autobuild_reuses_release_asset_and_feed(self):
         commit = "a" * 40
-        tag = "v1.2.3"
-        dmg_name = "Motionpaper-v1.2.3.dmg"
-        original_dmg = b"first nondeterministic disk image"
-        state = {
-            "branches": {"master": "b" * 40},
-            "tags": {tag: {"type": "commit", "sha": commit}},
-            "releases": [],
-            "latest": "Autobuild-" + "c" * 40,
-            "upload_failure_name": dmg_name,
-        }
-
-        first, after_first = self.run_publish(state, commit, "stable", "1.2.3", original_dmg)
-
-        self.assertNotEqual(first.returncode, 0)
-        draft = next(r for r in after_first["releases"] if r["tag_name"] == tag)
-        self.assertTrue(draft["draft"])
-        uploaded = next(a for a in draft["assets"] if a["name"] == dmg_name)
-        self.assertEqual(base64.b64decode(uploaded["content"]), original_dmg)
-        self.assertTrue(after_first["upload_failure_fired"])
-        calls_before_retry = len(after_first["calls"])
-
-        retry, published = self.run_publish(
-            after_first, commit, "stable", "1.2.3", b"a different rebuilt disk image"
-        )
-
-        self.assertEqual(retry.returncode, 0, retry.stderr)
-        release = next(r for r in published["releases"] if r["tag_name"] == tag)
-        self.assertFalse(release["draft"])
-        reused = next(a for a in release["assets"] if a["name"] == dmg_name)
-        self.assertEqual(reused["content"], uploaded["content"])
-        self.assertEqual(reused["digest"], uploaded["digest"])
-        self.assertFalse(any(
-            call[:3] == ["release", "upload", tag] and dmg_name in call
-            for call in published["calls"][calls_before_retry:]
-        ))
-
-    def test_stable_draft_rejects_legacy_named_dmg_before_upload_or_publish(self):
-        commit = "a" * 40
-        tag = "v1.2.3"
-        legacy_dmg_name = f"Motionpaper-1.2.3-{commit[:12]}.dmg"
-        draft = {
-            "id": 70,
-            "tag_name": tag,
-            "target_commitish": commit,
-            "draft": True,
-            "prerelease": False,
-            "published_at": None,
-            "assets": [asset(tag, legacy_dmg_name, b"existing legacy package")],
-        }
-        draft["assets"][0]["id"] = 701
-        state = {
-            "branches": {"master": "b" * 40},
-            "tags": {tag: {"type": "commit", "sha": commit}},
-            "releases": [draft],
-            "latest": "Autobuild-" + "c" * 40,
-        }
-
-        result, after = self.run_publish(state, commit, "stable", "1.2.3")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("non-standard DMG asset", result.stderr)
-        self.assertIn(legacy_dmg_name, result.stderr)
-        current = next(r for r in after["releases"] if r["tag_name"] == tag)
-        self.assertEqual(current["assets"], draft["assets"])
-        self.assertFalse(any(call[:2] == ["release", "upload"] for call in after["calls"]))
-        self.assertFalse(any(
-            "--method" in call and call[call.index("--method") + 1] in ("PATCH", "DELETE")
-            for call in after["calls"]
-        ))
-
-    def test_new_stable_upload_rejects_api_metadata_that_does_not_match_local_dmg(self):
-        commit = "1" * 40
-        tag = "v1.0.1"
-        dmg_name = "Motionpaper-v1.0.1.dmg"
-        state = {
-            "branches": {"master": "2" * 40},
-            "tags": {tag: {"type": "commit", "sha": commit}},
-            "releases": [],
-            "latest": "Autobuild-" + "3" * 40,
-            "upload_metadata_mismatch_name": dmg_name,
-        }
-
-        result, after = self.run_publish(state, commit, "stable", "1.0.1")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("size or SHA-256 does not match", result.stderr)
-        draft = next(r for r in after["releases"] if r["tag_name"] == tag)
-        self.assertTrue(draft["draft"])
-        self.assertFalse(any(
-            "--method" in call and call[call.index("--method") + 1] == "PATCH"
-            and "draft=false" in call
-            for call in after["calls"]
-        ))
-
-    def test_existing_stable_draft_rejects_tampered_downloaded_dmg(self):
-        commit = "4" * 40
-        tag = "v1.1.0"
-        dmg_name = "Motionpaper-v1.1.0.dmg"
-        draft_dmg = b"server accepted package bytes"
-        draft = {
-            "id": 71,
-            "tag_name": tag,
-            "target_commitish": commit,
-            "draft": True,
-            "prerelease": False,
-            "published_at": None,
-            "assets": [asset(tag, dmg_name, draft_dmg)],
-        }
-        draft["assets"][0]["id"] = 712
-        state = {
-            "branches": {"master": "5" * 40},
-            "tags": {tag: {"type": "commit", "sha": commit}},
-            "releases": [draft],
-            "latest": "Autobuild-" + "6" * 40,
-            "download_tamper_name": dmg_name,
-        }
-
-        result, after = self.run_publish(state, commit, "stable", "1.1.0", b"different local bytes")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("size or SHA-256 does not match", result.stderr)
-        current = next(r for r in after["releases"] if r["tag_name"] == tag)
-        self.assertTrue(current["draft"])
-        self.assertEqual(base64.b64decode(current["assets"][0]["content"]), draft_dmg)
-        self.assertTrue(after["download_tamper_fired"])
-        self.assertFalse(any(
-            "--method" in call and call[call.index("--method") + 1] == "PATCH"
-            and "draft=false" in call
-            for call in after["calls"]
-        ))
-
-    def test_first_stable_release_becomes_latest_and_binds_tag_and_commit(self):
-        commit = "a" * 40
-        default_head = "b" * 40
-        stable_tag = "v1.2.3"
-        previous_latest = "Autobuild-" + "f" * 40
-        state = {
-            "branches": {"master": default_head},
-            "tags": {stable_tag: {"type": "commit", "sha": commit}},
-            "releases": [],
-            "latest": previous_latest,
-        }
-        release_notes = "Motionpaper 1.2.3 release notes.\n\n- Stable channel update.\n- Universal macOS app.\n"
-        notes_path = self.root / "Support" / "ReleaseNotes"
-        notes_path.mkdir(parents=True)
-        (notes_path / "1.2.3.md").write_text(release_notes, encoding="utf-8")
-
-        result, published = self.run_publish(state, commit, "stable", "1.2.3")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        release = next(r for r in published["releases"] if r["tag_name"] == stable_tag)
-        self.assertEqual(release["target_commitish"], commit)
-        self.assertEqual(published["latest"], stable_tag)
-        self.assertEqual(published["last_release_request"]["body"], release_notes)
-        self.assertEqual(published["last_release_request"]["make_latest"], "false")
-        self.assertEqual([a["name"] for a in release["assets"]], ["Motionpaper-v1.2.3.dmg"])
-        self.assertTrue(all(call[0] != "release" or call[1] != "download" for call in published["calls"]))
-        self.assertFalse(any("branches/" in " ".join(call) for call in published["calls"]))
-        post = next(call for call in published["calls"] if "--method" in call and call[call.index("--method") + 1] == "POST")
-        self.assertIn("--input", post)
-        self.assertEqual(published["last_release_request"]["target_commitish"], commit)
-        self.assertEqual(published["last_release_request"]["tag_name"], stable_tag)
-        publish_patch = next(
-            call for call in published["calls"]
-            if "--method" in call and call[call.index("--method") + 1] == "PATCH"
-        )
-        self.assertIn("make_latest=true", publish_patch)
-
-    def test_stable_release_attaches_latest_autobuild_manifest_without_stealing_latest(self):
-        commit = "a" * 40
-        stable_commit = "b" * 40
-        auto_commit = "c" * 40
-        old_stable = released("v2.0.0", stable_commit, 20, "2026-02-01T00:00:00Z", "stable", "2.0.0")
-        current_auto = released(
-            "Autobuild-" + auto_commit, auto_commit, 30, "2026-03-01T00:00:00Z", "autobuild"
-        )
-        previous_latest = "v2.0.0"
-        state = {
-            "branches": {"master": "d" * 40},
-            "tags": {
-                "v2.0.0": {"type": "commit", "sha": stable_commit},
-                current_auto["tag_name"]: {"type": "commit", "sha": auto_commit},
-                "v1.2.3": {"type": "commit", "sha": commit},
-            },
-            "releases": [old_stable, current_auto],
-            "latest": previous_latest,
-        }
-
-        result, published = self.run_publish(state, commit, "stable", "1.2.3")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        new_stable = next(r for r in published["releases"] if r["tag_name"] == "v1.2.3")
-        update_asset = next(a for a in new_stable["assets"] if a["name"] == "update.json")
-        auto_update = next(a for a in current_auto["assets"] if a["name"] == "update.json")
-        self.assertEqual(update_asset["content"], auto_update["content"])
-        self.assertEqual(published["latest"], previous_latest)
-        self.assertEqual([a["name"] for a in new_stable["assets"]], [
-            "Motionpaper-v1.2.3.dmg", "update.json",
-        ])
-        self.assertFalse(any("make_latest=true" in call for call in published["calls"]))
-
-        calls_before_retry = len(published["calls"])
-        retry_result, retried = self.run_publish(published, commit, "stable", "1.2.3")
-        self.assertEqual(retry_result.returncode, 0, retry_result.stderr)
-        self.assertIn("Reusing complete published stable release", retry_result.stdout)
-        self.assertEqual(retried["latest"], previous_latest)
-        self.assertEqual(
-            next(r for r in retried["releases"] if r["tag_name"] == "v1.2.3")["assets"],
-            new_stable["assets"],
-        )
-        self.assertFalse(any(
-            call[:2] == ["release", "upload"] for call in retried["calls"][calls_before_retry:]
-        ))
-
-    def test_stable_publish_refreshes_manifest_when_latest_autobuild_changes_during_draft(self):
-        stable_commit = "a" * 40
-        old_stable_commit = "b" * 40
-        autobuild_m1_commit = "c" * 40
-        autobuild_m2_commit = "d" * 40
-        stable_tag = "v1.2.3"
-        old_stable_tag = "v1.0.0"
-        autobuild_m1_tag = "Autobuild-" + autobuild_m1_commit
-        autobuild_m2_tag = "Autobuild-" + autobuild_m2_commit
-        old_stable = released(
-            old_stable_tag, old_stable_commit, 100, "2026-01-01T00:00:00Z", "stable", "1.0.0"
-        )
-        autobuild_m1 = released(
-            autobuild_m1_tag, autobuild_m1_commit, 200, "2026-02-01T00:00:00Z", "autobuild"
-        )
-        autobuild_m2 = released(
-            autobuild_m2_tag, autobuild_m2_commit, 300, "2026-04-01T00:00:00Z", "autobuild"
-        )
-        state = {
-            "branches": {"master": "e" * 40},
-            "tags": {
-                old_stable_tag: {"type": "commit", "sha": old_stable_commit},
-                stable_tag: {"type": "commit", "sha": stable_commit},
-                autobuild_m1_tag: {"type": "commit", "sha": autobuild_m1_commit},
-            },
-            "releases": [old_stable, autobuild_m1],
-            "latest": old_stable_tag,
-            "stable_publish_hook": {
-                "stable_publish_tag": stable_tag,
-                "remove_autobuild_tag": autobuild_m1_tag,
-                "autobuild_release": autobuild_m2,
-                "sync_stable_tag": old_stable_tag,
-            },
-        }
-        m1_content = next(a for a in autobuild_m1["assets"] if a["name"] == "update.json")["content"]
-        m2_content = next(a for a in autobuild_m2["assets"] if a["name"] == "update.json")["content"]
-
-        result, after = self.run_publish(state, stable_commit, "stable", "1.2.3")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(after["stable_publish_hook_result"]["stable_update_before_hook"], m1_content)
-        self.assertNotIn(autobuild_m1_tag, {r["tag_name"] for r in after["releases"]})
-        self.assertIn(autobuild_m2_tag, {r["tag_name"] for r in after["releases"]})
-        latest_stable = next(r for r in after["releases"] if r["tag_name"] == stable_tag)
-        latest_update = next(a for a in latest_stable["assets"] if a["name"] == "update.json")
-        self.assertEqual(latest_update["content"], m2_content)
-        self.assertEqual(after["latest"], stable_tag)
-
-    def test_stable_latest_uses_numeric_version_order_and_backfill_does_not_take_it(self):
-        commit = "1" * 40
-        stable_19 = released("v1.9.0", "9" * 40, 19, "2026-02-01T00:00:00Z", "stable", "1.9.0")
-        preview_99 = released("v99.0.0", "8" * 40, 18, "2026-02-02T00:00:00Z", "stable", "99.0.0")
-        preview_99["prerelease"] = True
-        state = {
-            "branches": {"master": "2" * 40},
-            "tags": {
-                "v1.9.0": {"type": "commit", "sha": "9" * 40},
-                "v99.0.0": {"type": "commit", "sha": "8" * 40},
-                "v1.10.0": {"type": "commit", "sha": commit},
-            },
-            "releases": [stable_19, preview_99],
-            "latest": "v1.9.0",
-        }
-
-        result, after = self.run_publish(state, commit, "stable", "1.10.0")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(after["latest"], "v1.10.0")
-        stable_110 = next(r for r in after["releases"] if r["tag_name"] == "v1.10.0")
-        self.assertEqual(stable_110["assets"][0]["name"], "Motionpaper-v1.10.0.dmg")
-
-        backfill_commit = "3" * 40
-        after["branches"]["master"] = "4" * 40
-        after["tags"]["v1.8.0"] = {"type": "commit", "sha": backfill_commit}
-        backfill_result, backfilled = self.run_publish(after, backfill_commit, "stable", "1.8.0")
-
-        self.assertEqual(backfill_result.returncode, 0, backfill_result.stderr)
-        self.assertEqual(backfilled["latest"], "v1.10.0")
-        backfill_patch = next(
-            call for call in backfilled["calls"]
-            if "make_latest=false" in call and "releases/" in " ".join(call)
-        )
-        self.assertIn("make_latest=false", backfill_patch)
-
-    def test_stable_tag_must_resolve_to_the_requested_full_commit(self):
-        commit = "a" * 40
-        wrong_commit = "b" * 40
-        state = {
-            "branches": {"master": "c" * 40},
-            "tags": {"v1.2.3": {"type": "commit", "sha": wrong_commit}},
-            "releases": [],
-            "latest": "Autobuild-" + "f" * 40,
-        }
-
-        result, after = self.run_publish(state, commit, "stable", "1.2.3")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("instead of", result.stderr)
-        self.assertEqual(after["releases"], [])
-        self.assertFalse(any("--method" in call and call[call.index("--method") + 1] in ("POST", "PATCH") for call in after["calls"]))
-
-    def test_autobuild_without_a_stable_release_never_marks_itself_latest(self):
-        commit = "5" * 40
-        state = {
-            "branches": {"master": commit},
-            "tags": {},
-            "releases": [],
-        }
-
-        result, after = self.run_publish(state, commit, "autobuild", "1.0.0")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(any("make_latest=true" in call for call in after["calls"]))
-        self.assertNotIn("latest", after)
-
-    def test_autobuild_sync_reuses_identical_stable_compatibility_asset(self):
-        commit = "e" * 40
-        stable_commit = "f" * 40
-        stable = released("v1.0.0", stable_commit, 101, "2026-01-01T00:00:00Z", "stable", "1.0.0")
-        autobuild = released(
-            "Autobuild-" + commit, commit, 102, "2026-02-01T00:00:00Z", "autobuild"
-        )
-        preview_commit = "9" * 40
-        preview = released(
-            "Autobuild-" + preview_commit, preview_commit, 103, "2027-02-01T00:00:00Z", "autobuild"
-        )
-        preview["prerelease"] = True
-        auto_update = next(a for a in autobuild["assets"] if a["name"] == "update.json")
-        stable_update = asset("v1.0.0", "update.json", base64.b64decode(auto_update["content"]))
-        stable_update["id"] = stable["id"] * 10 + 2
-        stable["assets"].append(stable_update)
-        stable_update_id = stable_update["id"]
-        state = {
-            "branches": {"master": commit},
-            "tags": {
-                "v1.0.0": {"type": "commit", "sha": stable_commit},
-                autobuild["tag_name"]: {"type": "commit", "sha": commit},
-                preview["tag_name"]: {"type": "commit", "sha": preview_commit},
-            },
-            "releases": [stable, autobuild, preview],
-            "latest": "v1.0.0",
-        }
-
-        result, after = self.run_publish(state, commit, "autobuild", "1.0.0")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        latest_stable = next(r for r in after["releases"] if r["tag_name"] == "v1.0.0")
-        self.assertEqual(
-            next(a for a in latest_stable["assets"] if a["name"] == "update.json")["id"],
-            stable_update_id,
-        )
-        self.assertNotIn(preview["tag_name"], {r["tag_name"] for r in after["releases"]})
-        self.assertFalse(any(call[:2] == ["release", "upload"] for call in after["calls"]))
-        self.assertFalse(any(
-            "--method" in call and call[call.index("--method") + 1] == "DELETE"
-            and "/releases/assets/" in " ".join(call)
-            for call in after["calls"]
-        ))
-
-    def test_autobuild_sync_rejects_nonstandard_dmg_on_published_stable_release(self):
-        commit = "e" * 40
-        state, _, _ = self.autobuild_sync_state(commit)
-        stable = next(r for r in state["releases"] if r["tag_name"] == "v1.0.0")
-        legacy_dmg_name = "Motionpaper-1.0.0-" + stable["target_commitish"][:12] + ".dmg"
-        unexpected = asset(stable["tag_name"], legacy_dmg_name, b"legacy published package")
-        unexpected["id"] = stable["id"] * 10 + 3
-        stable["assets"].append(unexpected)
-        original_assets = json.loads(json.dumps(stable["assets"]))
-
-        result, after = self.run_publish(state, commit, "autobuild", "1.0.0")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("non-standard DMG asset", result.stderr)
-        self.assertIn(legacy_dmg_name, result.stderr)
-        stable_after = next(r for r in after["releases"] if r["tag_name"] == stable["tag_name"])
-        self.assertEqual(stable_after["assets"], original_assets)
-        self.assertFalse(any(call[:2] == ["release", "upload"] for call in after["calls"]))
-        self.assertFalse(any(
-            "--method" in call and call[call.index("--method") + 1] in ("PATCH", "DELETE")
-            and "/releases/assets/" in " ".join(call)
-            for call in after["calls"]
-        ))
-
-    def test_autobuild_sync_upload_failure_keeps_old_stable_manifest_and_retry_completes(self):
-        commit = "7" * 40
-        state, old_content, new_content = self.autobuild_sync_state(commit)
-        state["upload_failure_name_prefix"] = "update.json.staging-"
-
-        first, after_first = self.run_publish(state, commit, "autobuild", "1.0.0")
-
-        self.assertNotEqual(first.returncode, 0)
-        stable = next(r for r in after_first["releases"] if r["tag_name"] == "v1.0.0")
-        live_manifest = next(a for a in stable["assets"] if a["name"] == "update.json")
-        self.assertEqual(live_manifest["content"], old_content)
-        self.assertTrue(any(a["name"].startswith("update.json.staging-") for a in stable["assets"]))
-        self.assertTrue(after_first["upload_failure_fired"])
-
-        calls_before_retry = len(after_first["calls"])
-        retry, after_retry = self.run_publish(after_first, commit, "autobuild", "1.0.0")
-
-        self.assertEqual(retry.returncode, 0, retry.stderr)
-        stable_after = next(r for r in after_retry["releases"] if r["tag_name"] == "v1.0.0")
-        self.assertEqual(
-            next(a for a in stable_after["assets"] if a["name"] == "update.json")["content"],
-            new_content,
-        )
-        self.assertFalse(any(
-            a["name"].startswith(("update.json.staging-", "update.json.backup-"))
-            for a in stable_after["assets"]
-        ))
-        self.assertFalse(any(
-            call[:3] == ["release", "upload", "v1.0.0"]
-            for call in after_retry["calls"][calls_before_retry:]
-        ))
-
-    def test_autobuild_sync_rename_failures_restore_old_manifest_and_retry_completes(self):
-        commit = "8" * 40
-        failures = [
-            {"asset_rename_failures": {"update.json": 1}},
-            {"asset_rename_response_failures": {"update.json.backup-1012": 1}},
-            {"asset_rename_failures": {"update.json": 1}, "read_failure_after_rename_failure": True},
-        ]
-        for failure in failures:
-            with self.subTest(failure=failure):
-                state, old_content, new_content = self.autobuild_sync_state(commit)
-                state.update(failure)
-
-                first, after_first = self.run_publish(state, commit, "autobuild", "1.0.0")
-
-                self.assertNotEqual(first.returncode, 0)
-                stable = next(r for r in after_first["releases"] if r["tag_name"] == "v1.0.0")
-                live_manifest = next(a for a in stable["assets"] if a["name"] == "update.json")
-                self.assertEqual(live_manifest["content"], old_content)
-                self.assertTrue(any(a["name"].startswith("update.json.staging-") for a in stable["assets"]))
-                self.assertFalse(any(a["name"].startswith("update.json.backup-") for a in stable["assets"]))
-
-                retry, after_retry = self.run_publish(after_first, commit, "autobuild", "1.0.0")
-
-                self.assertEqual(retry.returncode, 0, retry.stderr)
-                stable_after = next(r for r in after_retry["releases"] if r["tag_name"] == "v1.0.0")
-                self.assertEqual(
-                    next(a for a in stable_after["assets"] if a["name"] == "update.json")["content"],
-                    new_content,
-                )
-                self.assertFalse(any(
-                    a["name"].startswith(("update.json.staging-", "update.json.backup-"))
-                    for a in stable_after["assets"]
-                ))
-
-    def test_autobuild_sync_accepts_successful_promotion_after_a_lost_response(self):
-        commit = "8" * 40
-        state, _, new_content = self.autobuild_sync_state(commit)
-        state["asset_rename_response_failures"] = {"update.json": 1}
-
-        result, after = self.run_publish(state, commit, "autobuild", "1.0.0")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        stable = next(r for r in after["releases"] if r["tag_name"] == "v1.0.0")
-        self.assertEqual(next(a for a in stable["assets"] if a["name"] == "update.json")["content"], new_content)
-        self.assertFalse(any(
-            a["name"].startswith(("update.json.staging-", "update.json.backup-"))
-            for a in stable["assets"]
-        ))
-
-    def test_stable_release_without_notes_file_uses_short_default_body(self):
-        commit = "2" * 40
-        state = {
-            "branches": {"master": "3" * 40},
-            "tags": {"v1.0.1": {"type": "commit", "sha": commit}},
-            "releases": [],
-            "latest": "Autobuild-" + "4" * 40,
-        }
-
-        result, published = self.run_publish(state, commit, "stable", "1.0.1")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            published["last_release_request"]["body"],
-            "Motionpaper stable release 1.0.1.\n",
-        )
-
-    def test_published_stable_retry_reuses_release_and_repairs_latest_to_highest_stable(self):
-        commit = "9" * 40
-        tag = "v1.0.0"
-        stable_release = released(tag, commit, 51, "2026-03-01T00:00:00Z", "stable", "1.0.0")
-        newer_commit = "8" * 40
-        newer_tag = "v1.10.0"
-        newer_release = released(newer_tag, newer_commit, 52, "2026-03-02T00:00:00Z", "stable", "1.10.0")
-        state = {
-            "branches": {"master": "8" * 40},
-            "tags": {
-                tag: {"type": "commit", "sha": commit},
-                newer_tag: {"type": "commit", "sha": newer_commit},
-            },
-            "releases": [stable_release, newer_release],
-            "latest": "Autobuild-" + "7" * 40,
-        }
-
-        result, after = self.run_publish(state, commit, "stable", "1.0.0", b"different rebuilt DMG bytes")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Reusing complete published stable release", result.stdout)
-        self.assertEqual(after["latest"], newer_tag)
-        self.assertEqual(after["releases"], state["releases"])
-        self.assertFalse(any(
-            ("--method" in call and call[call.index("--method") + 1] in ("POST", "DELETE"))
-            or (call[:2] == ["release", "upload"])
-            for call in after["calls"]
-        ))
-        self.assertTrue(any(
-            "--method" in call and call[call.index("--method") + 1] == "PATCH"
-            and "releases/52" in " ".join(call) and "make_latest=true" in call
-            for call in after["calls"]
-        ))
-
-    def test_published_stable_reuse_rejects_extra_legacy_named_dmg(self):
-        commit = "9" * 40
-        tag = "v1.0.0"
-        stable_release = released(tag, commit, 51, "2026-03-01T00:00:00Z", "stable", "1.0.0")
-        legacy_dmg_name = f"Motionpaper-1.0.0-{commit[:12]}.dmg"
-        stable_release["assets"].append(asset(tag, legacy_dmg_name, b"legacy published package"))
-        stable_release["assets"][-1]["id"] = 512
-        original_assets = json.loads(json.dumps(stable_release["assets"]))
-        state = {
-            "branches": {"master": "8" * 40},
-            "tags": {tag: {"type": "commit", "sha": commit}},
-            "releases": [stable_release],
-            "latest": "Autobuild-" + "7" * 40,
-        }
-
-        result, after = self.run_publish(state, commit, "stable", "1.0.0")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("non-standard DMG asset", result.stderr)
-        self.assertIn(legacy_dmg_name, result.stderr)
-        reused = next(r for r in after["releases"] if r["tag_name"] == tag)
-        self.assertEqual(reused["assets"], original_assets)
-        self.assertEqual(after["latest"], state["latest"])
-        self.assertFalse(any(call[:2] == ["release", "upload"] for call in after["calls"]))
-        self.assertFalse(any(
-            "--method" in call and call[call.index("--method") + 1] in ("PATCH", "DELETE")
-            for call in after["calls"]
-        ))
-
-    def test_existing_prerelease_with_stable_tag_is_rejected(self):
-        commit = "9" * 40
-        tag = "v1.0.0"
-        preview = released(tag, commit, 61, "2026-03-01T00:00:00Z", "stable", "1.0.0")
-        preview["prerelease"] = True
-        state = {
-            "branches": {"master": "8" * 40},
-            "tags": {tag: {"type": "commit", "sha": commit}},
-            "releases": [preview],
-            "latest": "Autobuild-" + "7" * 40,
-        }
-
-        result, after = self.run_publish(state, commit, "stable", "1.0.0")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("marked as a prerelease", result.stderr)
-        self.assertEqual(after["releases"], state["releases"])
-        self.assertEqual(after["latest"], state["latest"])
-        self.assertFalse(any(
-            "--method" in call and call[call.index("--method") + 1] in ("PATCH", "DELETE")
-            or call[:2] == ["release", "upload"]
-            for call in after["calls"]
-        ))
-
-    def test_published_stable_retry_repairs_latest_after_a_newer_stable_races_the_patch(self):
-        old_commit = "9" * 40
-        old_tag = "v1.0.0"
-        old_release = released(old_tag, old_commit, 51, "2026-03-01T00:00:00Z", "stable", "1.0.0")
-        newer_commit = "8" * 40
-        newer_tag = "v2.0.0"
-        newer_release = released(
-            newer_tag, newer_commit, 52, "2026-03-02T00:00:00Z", "stable", "2.0.0"
-        )
-        auto_commit = "7" * 40
-        auto_release = released(
-            "Autobuild-" + auto_commit, auto_commit, 53,
-            "2026-03-03T00:00:00Z", "autobuild",
-        )
-        state = {
-            "branches": {"master": "6" * 40},
-            "tags": {
-                old_tag: {"type": "commit", "sha": old_commit},
-                auto_release["tag_name"]: {"type": "commit", "sha": auto_commit},
-            },
-            "releases": [old_release, auto_release],
-            "latest": auto_release["tag_name"],
-            "latest_patch_hook": {"patch_tag": old_tag, "release": newer_release},
-        }
-        stable_dmg_before = {
-            old_tag: next(a for a in old_release["assets"] if a["name"].endswith(".dmg")),
-            newer_tag: next(a for a in newer_release["assets"] if a["name"].endswith(".dmg")),
-        }
-
-        result, after = self.run_publish(state, old_commit, "stable", "1.0.0", b"rebuilt DMG")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Reusing complete published stable release", result.stdout)
-        self.assertEqual(after["latest_patch_hook_fired"], newer_tag)
-        self.assertEqual(after["latest"], newer_tag)
-        self.assertEqual(
-            {release["tag_name"] for release in after["releases"] if release["tag_name"].startswith("v")},
-            {old_tag, newer_tag},
-        )
-        for stable_release in after["releases"]:
-            if stable_release["tag_name"] in stable_dmg_before:
-                stable_dmg_after = next(
-                    a for a in stable_release["assets"] if a["name"].endswith(".dmg")
-                )
-                self.assertEqual(stable_dmg_after, stable_dmg_before[stable_release["tag_name"]])
-
-        latest_true_targets = [
-            next(value for value in call if value.startswith("repos/") and "/releases/" in value)
-            for call in after["calls"]
-            if "--method" in call and call[call.index("--method") + 1] == "PATCH"
-            and "make_latest=true" in call
-        ]
-        self.assertEqual(latest_true_targets, [f"repos/{REPOSITORY}/releases/51", f"repos/{REPOSITORY}/releases/52"])
-        self.assertFalse(any(
-            "make_latest=true" in call and f"releases/{auto_release['id']}" in " ".join(call)
-            for call in after["calls"]
-        ))
-
-    def test_published_asset_must_be_uploaded_and_have_the_expected_browser_url(self):
-        commit = "6" * 40
-        tag = "v1.0.0"
-        for field, invalid_value in (
-            ("state", "uploading"),
-            ("browser_download_url", f"{RELEASE_BASE}/{tag}/wrong.dmg"),
-        ):
-            with self.subTest(field=field):
-                stable_release = released(tag, commit, 61, "2026-03-01T00:00:00Z", "stable", "1.0.0")
-                stable_release["assets"][0][field] = invalid_value
-                state = {
-                    "branches": {"master": "5" * 40},
-                    "tags": {tag: {"type": "commit", "sha": commit}},
-                    "releases": [stable_release],
-                    "latest": "Autobuild-" + "7" * 40,
-                }
-
-                result, after = self.run_publish(state, commit, "stable", "1.0.0")
-
+        first, state = self.publish(state_for(commit), commit)
+        self.assert_success(first)
+        self.assertEqual([r["tag_name"] for r in state["releases"]], ["Autobuild"])
+        self.assertEqual(list(state["tags"]), ["Autobuild"])
+        self.assertEqual(read_feed(state)["autobuild"]["commit"], commit)
+        self.assertEqual(read_feed(state)["autobuild"]["downloadURL"], f"{BASE}/Autobuild/Motionpaper-{'a' * 12}.dmg")
+        calls, head = len(state["calls"]), state["updates"]
+        second, state = self.publish(state, commit, content=b"different rebuild bytes")
+        self.assert_success(second)
+        self.assertIn("Reusing complete", second.stdout)
+        self.assertEqual(state["updates"], head)
+        self.assertFalse(any(call[:2] in (["release", "upload"], ["release", "download"]) for call in state["calls"][calls:]))
+        self.assertFalse(any("git/trees" in call for call in state["calls"][calls:]))
+
+    def test_two_commits_keep_one_release_and_old_dmg_and_publish_in_order(self):
+        first_commit, second_commit = "a" * 40, "b" * 40
+        first, state = self.publish(state_for(first_commit), first_commit)
+        self.assert_success(first)
+        old_feed = read_feed(state)
+        state["branches"]["main"] = second_commit
+        offset = len(state["calls"])
+        result, state = self.publish(state, second_commit)
+        self.assert_success(result)
+        self.assertEqual(list(state["tags"]), ["Autobuild"])
+        self.assertEqual(state["tags"]["Autobuild"]["sha"], second_commit)
+        self.assertEqual(len(state["releases"]), 1)
+        release = state["releases"][0]
+        self.assertEqual(release["target_commitish"], first_commit)
+        self.assertEqual({item["name"] for item in release["assets"]},
+                         {f"Motionpaper-{first_commit[:12]}.dmg", f"Motionpaper-{second_commit[:12]}.dmg"})
+        self.assertEqual(read_feed(state)["autobuild"]["commit"], second_commit)
+        self.assertTrue(any(item["browser_download_url"] == old_feed["autobuild"]["downloadURL"] for item in release["assets"]))
+        calls = state["calls"][offset:]
+        upload = next(i for i, c in enumerate(calls) if c[:2] == ["release", "upload"])
+        tag_move = next(i for i, c in enumerate(calls) if "repos/owner/repo/git/refs/tags/Autobuild" in c and "PATCH" in c)
+        release_update = next(i for i, c in enumerate(calls) if "repos/owner/repo/releases/1" in c and "PATCH" in c)
+        feed_update = next(i for i, c in enumerate(calls) if "repos/owner/repo/git/refs/heads/updates" in c and "PATCH" in c)
+        self.assertLess(upload, tag_move)
+        self.assertLess(tag_move, release_update)
+        self.assertLess(release_update, feed_update)
+        self.assertFalse(any("DELETE" in call for call in calls))
+
+    def test_failed_upload_preserves_old_feed_tag_and_dmg_and_retry_resumes(self):
+        for when in ("before", "after"):
+            with self.subTest(when=when):
+                old, new = "a" * 40, "b" * 40
+                result, state = self.publish(state_for(old), old)
+                self.assert_success(result)
+                head, old_feed = state["updates"], read_feed(state)
+                state["branches"]["main"] = new
+                state["upload_fail"] = when
+                result, state = self.publish(state, new)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("release asset", result.stderr)
-                self.assertEqual(after["latest"], state["latest"])
+                self.assertEqual(state["updates"], head)
+                self.assertEqual(read_feed(state), old_feed)
+                self.assertEqual(state["tags"]["Autobuild"]["sha"], old)
+                self.assertEqual(state["releases"][0]["target_commitish"], old)
+                self.assertIn(f"Motionpaper-{old[:12]}.dmg", [item["name"] for item in state["releases"][0]["assets"]])
+                result, state = self.publish(state, new, content=b"different retry")
+                self.assert_success(result)
+                self.assertEqual(read_feed(state)["autobuild"]["commit"], new)
 
-    def test_autobuild_uses_legacy_manifest_and_cleanup_preserves_stable_releases(self):
-        commit = "c" * 40
-        stable_commits = ["e" * 40, "f" * 40]
-        stable_releases = [
-            released("v1.0.0", stable_commits[0], 101, "2025-01-01T00:00:00Z", "stable", "1.0.0"),
-            released("v2.0.0", stable_commits[1], 102, "2025-02-01T00:00:00Z", "stable", "2.0.0"),
-        ]
-        tags = {
-            "v1.0.0": {"type": "commit", "sha": stable_commits[0]},
-            "v2.0.0": {"type": "commit", "sha": stable_commits[1]},
-        }
-        autobuilds = []
-        for index, day in enumerate((1, 2, 3, 4), start=1):
-            old_commit = str(index) * 40
-            old_tag = "Autobuild-" + old_commit
-            old_date = f"2025-04-0{day}T00:00:00Z"
-            autobuilds.append(released(old_tag, old_commit, 300 + index, old_date, "autobuild"))
-            tags[old_tag] = {"type": "commit", "sha": old_commit}
-        invalid_commit = "5" * 40
-        invalid_tag = "Autobuild-" + invalid_commit
-        invalid_release = released(invalid_tag, invalid_commit, 305, "2024-01-01T00:00:00Z", "autobuild")
-        invalid_release["assets"][0]["state"] = "new"
-        invalid_release["draft"] = True
-        invalid_release["published_at"] = None
-        tags[invalid_tag] = {"type": "commit", "sha": invalid_commit}
-        wrong_target_commit = "6" * 40
-        wrong_target_tag = "Autobuild-" + wrong_target_commit
-        wrong_target_release = released(
-            wrong_target_tag, wrong_target_commit, 306, "2025-04-05T00:00:00Z", "autobuild"
-        )
-        wrong_target_release["target_commitish"] = "7" * 40
-        tags[wrong_target_tag] = {"type": "commit", "sha": wrong_target_commit}
-        wrong_ref_commit = "8" * 40
-        wrong_ref_tag = "Autobuild-" + wrong_ref_commit
-        wrong_ref_release = released(
-            wrong_ref_tag, wrong_ref_commit, 307, "2025-04-06T00:00:00Z", "autobuild"
-        )
-        tags[wrong_ref_tag] = {"type": "commit", "sha": "9" * 40}
-        other_release = {
-            "id": 200,
-            "tag_name": "maintenance-notes",
-            "target_commitish": "d" * 40,
-            "draft": False,
-            "published_at": "2024-01-01T00:00:00Z",
-            "assets": [],
-        }
-        state = {
-            "branches": {"master": commit},
-            "tags": tags,
-            "releases": stable_releases + [
-                other_release, invalid_release, wrong_target_release, wrong_ref_release,
-            ] + autobuilds,
-            "paginate_releases": True,
-            "latest": autobuilds[-1]["tag_name"],
-        }
-        local_dmg = b"small local DMG fixture bytes"
-        stable_dmg_before = {
-            release["tag_name"]: next(a for a in release["assets"] if a["name"].endswith(".dmg"))
-            for release in stable_releases
-        }
+    def test_first_autobuild_draft_resumes_an_interrupted_upload(self):
+        commit = "a" * 40
+        state = state_for(commit)
+        state["upload_fail"] = "after"
+        result, state = self.publish(state, commit, content=b"verified on retry")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(state["releases"][0]["draft"])
+        self.assertIsNone(state["updates"])
+        result, state = self.publish(state, commit, content=b"a different rebuild")
+        self.assert_success(result)
+        self.assertFalse(state["releases"][0]["draft"])
+        self.assertEqual(read_feed(state)["autobuild"]["sha256"], hashlib.sha256(b"verified on retry").hexdigest())
+        self.assertTrue(any(call[:2] == ["release", "download"] for call in state["calls"]))
 
-        result, after = self.run_publish(state, commit, "autobuild", "1.0.0", local_dmg)
+    def test_invalid_upload_metadata_never_moves_tag_or_feed(self):
+        old, new = "a" * 40, "b" * 40
+        result, state = self.publish(state_for(old), old)
+        self.assert_success(result)
+        old_head = state["updates"]
+        state["branches"]["main"] = new
+        state["wrong_upload_size"] = True
+        result, state = self.publish(state, new)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match", result.stderr)
+        self.assertEqual(state["updates"], old_head)
+        self.assertEqual(state["tags"]["Autobuild"]["sha"], old)
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        current_tag = "Autobuild-" + commit
-        current = next(r for r in after["releases"] if r["tag_name"] == current_tag)
-        self.assertEqual(current["target_commitish"], commit)
-        self.assertEqual(after["latest"], "v2.0.0")
-        manifest_asset = next(a for a in current["assets"] if a["name"] == "update.json")
-        manifest = json.loads(base64.b64decode(manifest_asset["content"]))
-        self.assertEqual(set(manifest), {"commit", "publishedAt", "downloadURL", "sha256", "size"})
-        self.assertEqual(manifest["commit"], commit)
-        self.assertEqual(manifest["downloadURL"], f"{RELEASE_BASE}/{current_tag}/Motionpaper-{commit[:12]}.dmg")
-        self.assertEqual(manifest["sha256"], hashlib.sha256(local_dmg).hexdigest())
-        self.assertEqual(manifest["size"], len(local_dmg))
-        self.assertNotEqual(manifest_asset["size"], len(local_dmg))
+    def test_advanced_branch_is_skipped_before_and_after_upload(self):
+        old, new = "a" * 40, "b" * 40
+        state = state_for(new)
+        result, state = self.publish(state, old)
+        self.assert_success(result)
+        self.assertEqual(state["releases"], [])
+        result, state = self.publish(state_for(old), old)
+        self.assert_success(result)
+        head = state["updates"]
+        state["branches"]["main"] = new
+        state["branch_after_upload"] = "c" * 40
+        result, state = self.publish(state, new)
+        self.assert_success(result)
+        self.assertEqual(state["tags"]["Autobuild"]["sha"], old)
+        self.assertEqual(state["updates"], head)
 
-        surviving = {release["tag_name"] for release in after["releases"]}
-        self.assertIn("v1.0.0", surviving)
-        self.assertIn("v2.0.0", surviving)
-        self.assertIn("maintenance-notes", surviving)
-        self.assertEqual(
-            {tag for tag in surviving if tag.startswith("Autobuild-")},
-            {current_tag, wrong_target_tag, wrong_ref_tag},
-        )
-        self.assertEqual(
-            {tag for tag in after["tags"] if tag.startswith("Autobuild-")},
-            {current_tag, wrong_target_tag, wrong_ref_tag},
-        )
-        self.assertIn("v1.0.0", after["tags"])
-        self.assertIn("v2.0.0", after["tags"])
+    def test_api_failure_is_not_mistaken_for_missing_tag_or_old_branch(self):
+        commit = "a" * 40
+        for failure in ("fail_tag_read", "fail_branch"):
+            with self.subTest(failure=failure):
+                state = state_for(commit)
+                state[failure] = True
+                result, state = self.publish(state, commit)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(state["releases"], [])
+                self.assertEqual(state["tags"], {})
 
-        highest_stable = next(r for r in after["releases"] if r["tag_name"] == "v2.0.0")
-        stable_compat = next(a for a in highest_stable["assets"] if a["name"] == "update.json")
-        self.assertEqual(stable_compat["content"], manifest_asset["content"])
-        for stable_release in after["releases"]:
-            if stable_release["tag_name"] in stable_dmg_before:
-                stable_dmg_after = next(a for a in stable_release["assets"] if a["name"].endswith(".dmg"))
-                self.assertEqual(stable_dmg_after, stable_dmg_before[stable_release["tag_name"]])
+    def test_stable_draft_retry_reuses_verified_bytes_without_deleting_other_assets(self):
+        commit = "a" * 40
+        state = state_for(commit)
+        draft = released("stable", commit, version="1.2.3", draft=True)
+        extra = asset("v1.2.3", "notes.txt", b"notes")
+        extra["id"] = 11
+        draft["assets"].append(extra)
+        add_release(state, draft)
+        result, state = self.publish(state, commit, "stable", "1.2.3", content=b"different rebuild")
+        self.assert_success(result)
+        self.assertEqual(state["latest"], "v1.2.3")
+        self.assertEqual(read_feed(state)["stable"]["commit"], commit)
+        self.assertEqual({item["name"] for item in state["releases"][0]["assets"]}, {"Motionpaper-v1.2.3.dmg", "notes.txt"})
+        self.assertTrue(any(call[:2] == ["release", "download"] for call in state["calls"]))
+        self.assertFalse(any(call[:2] == ["release", "upload"] or "DELETE" in call for call in state["calls"]))
 
-        release_deletes = [
-            index for index, call in enumerate(after["calls"])
-            if "--method" in call and call[call.index("--method") + 1] == "DELETE"
-            and any("/releases/" in value and "/assets/" not in value for value in call)
-        ]
-        stable_compat_upload = next(
-            index for index, call in enumerate(after["calls"])
-            if call[:3] == ["release", "upload", "v2.0.0"]
-        )
-        self.assertTrue(release_deletes)
-        self.assertLess(stable_compat_upload, min(release_deletes))
-        latest_true_calls = [call for call in after["calls"] if "make_latest=true" in call]
-        self.assertTrue(latest_true_calls)
-        self.assertTrue(all("releases/102" in " ".join(call) for call in latest_true_calls))
+    def test_tampered_existing_draft_dmg_is_not_published(self):
+        commit = "a" * 40
+        state = state_for(commit)
+        add_release(state, released("stable", commit, version="1.2.3", draft=True))
+        state["tamper_download"] = True
+        result, state = self.publish(state, commit, "stable", "1.2.3")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(state["releases"][0]["draft"])
+        self.assertIsNone(state["updates"])
 
-        downloads = [call for call in after["calls"] if call[:2] == ["release", "download"]]
-        self.assertTrue(downloads)
-        self.assertTrue(all(call[call.index("--pattern") + 1] == "update.json" for call in downloads))
+    def test_stable_highest_version_remains_latest_and_feed_uses_highest_on_bootstrap(self):
+        old, high = "a" * 40, "b" * 40
+        state = state_for(old)
+        add_release(state, released("stable", high, 3, "1.10.0"))
+        state["latest"] = "v1.10.0"
+        state["tags"]["v1.2.3"] = {"type": "commit", "sha": old}
+        result, state = self.publish(state, old, "stable", "1.2.3")
+        self.assert_success(result)
+        self.assertEqual(state["latest"], "v1.10.0")
+        self.assertEqual(read_feed(state)["stable"]["version"], "1.10.0")
+        self.assertEqual(len(state["releases"]), 2)
+
+    def test_missing_latest_is_repaired_to_highest_stable(self):
+        commit = "a" * 40
+        state = state_for(commit)
+        add_release(state, released("stable", commit, version="1.2.3"))
+        result, state = self.publish(state, commit, "stable", "1.2.3")
+        self.assert_success(result)
+        self.assertEqual(state["latest"], "v1.2.3")
+
+    def test_colliding_short_commit_does_not_replace_an_existing_dmg(self):
+        old = "a" * 12 + "0" * 28
+        new = "a" * 12 + "1" * 28
+        result, state = self.publish(state_for(old), old)
+        self.assert_success(result)
+        state["branches"]["main"] = new
+        result, state = self.publish(state, new)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("collide", result.stderr)
+        self.assertEqual(state["tags"]["Autobuild"]["sha"], old)
+        self.assertEqual(read_feed(state)["autobuild"]["commit"], old)
+
+    def test_published_stable_is_reused_and_never_has_assets_deleted(self):
+        commit = "a" * 40
+        state = state_for(commit)
+        stable = released("stable", commit, version="1.2.3")
+        extra = asset("v1.2.3", "notes.txt", b"release notes")
+        extra["id"] = 11
+        stable["assets"].append(extra)
+        add_release(state, stable)
+        state["latest"] = "v1.2.3"
+        result, state = self.publish(state, commit, "stable", "1.2.3")
+        self.assert_success(result)
+        self.assertEqual(state["releases"][0]["assets"], stable["assets"])
+        self.assertFalse(any("DELETE" in call or call[:2] == ["release", "upload"] for call in state["calls"]))
+
+    def test_published_stable_wrong_tag_extra_dmg_and_invalid_url_are_rejected(self):
+        commit = "a" * 40
+        for fault in ("tag", "extra", "url", "digest"):
+            with self.subTest(fault=fault):
+                state = state_for(commit)
+                stable = released("stable", commit, version="1.2.3")
+                add_release(state, stable)
+                state["latest"] = "v1.2.3"
+                if fault == "tag": state["tags"]["v1.2.3"]["sha"] = "b" * 40
+                if fault == "extra": stable["assets"].append(asset("v1.2.3", "extra.dmg"))
+                if fault == "url": stable["assets"][0]["browser_download_url"] = "https://example.com/evil"
+                if fault == "digest": stable["assets"][0]["digest"] = "sha256:" + "A" * 64
+                result, state = self.publish(state, commit, "stable", "1.2.3")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIsNone(state["updates"])
+                self.assertFalse(any("DELETE" in call for call in state["calls"]))
+
+    def test_interrupted_transition_after_tag_move_can_resume(self):
+        old, new = "a" * 40, "b" * 40
+        result, state = self.publish(state_for(old), old)
+        self.assert_success(result)
+        state["branches"]["main"] = new
+        item = asset("Autobuild", f"Motionpaper-{new[:12]}.dmg", b"already uploaded")
+        item["id"] = 20
+        state["releases"][0]["assets"].append(item)
+        state["tags"]["Autobuild"]["sha"] = new
+        result, state = self.publish(state, new)
+        self.assert_success(result)
+        self.assertEqual(state["releases"][0]["target_commitish"], old)
+        self.assertEqual(read_feed(state)["autobuild"]["commit"], new)
+
+    def test_newer_commit_recovers_after_tag_moved_but_metadata_not_patched(self):
+        for interrupted_by in ("branch_advanced", "patch_failed"):
+            with self.subTest(interrupted_by=interrupted_by):
+                c0, c1, c2 = "a" * 40, "b" * 40, "c" * 40
+                result, state = self.publish(state_for(c0), c0)
+                self.assert_success(result)
+                feed_head = state["updates"]
+                state["branches"]["main"] = c1
+                if interrupted_by == "branch_advanced":
+                    state["branch_after_tag_move"] = c2
+                else:
+                    state["fail_auto_patch"] = True
+                result, state = self.publish(state, c1)
+                if interrupted_by == "branch_advanced":
+                    self.assert_success(result)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    state["branches"]["main"] = c2
+                self.assertEqual(state["tags"]["Autobuild"]["sha"], c1)
+                self.assertEqual(state["releases"][0]["target_commitish"], c0)
+                self.assertEqual(state["updates"], feed_head)
+                result, state = self.publish(state, c2)
+                self.assert_success(result)
+                self.assertEqual(state["tags"]["Autobuild"]["sha"], c2)
+                self.assertEqual(state["releases"][0]["target_commitish"], c0)
+                self.assertEqual(read_feed(state)["autobuild"]["commit"], c2)
+                self.assertEqual({asset["name"] for asset in state["releases"][0]["assets"]},
+                                 {f"Motionpaper-{c[:12]}.dmg" for c in (c0, c1, c2)})
+
+    def test_tag_changed_during_upload_is_rejected_even_if_it_is_the_new_commit(self):
+        old, new = "a" * 40, "b" * 40
+        result, state = self.publish(state_for(old), old)
+        self.assert_success(result)
+        head = state["updates"]
+        state["branches"]["main"] = new
+        state["tag_after_upload"] = new
+        result, state = self.publish(state, new)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("tag changed during upload", result.stderr)
+        self.assertEqual(state["releases"][0]["target_commitish"], old)
+        self.assertEqual(state["updates"], head)
 
 
 if __name__ == "__main__":
