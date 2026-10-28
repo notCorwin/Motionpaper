@@ -299,9 +299,9 @@ class PublishReleaseTests(unittest.TestCase):
         self.assert_success(result)
         expected = (
             f"基于 {branch} 分支提交 `{commit[:7]}` 自动构建的版本。\n"
-            "此版本可能存在 Bug，建议使用正式版。\n\n"
+            f"此版本可能存在 Bug，建议使用 [Latest](https://github.com/{REPOSITORY}/releases/latest)。\n\n"
             f"Automatically built from commit `{commit[:7]}` on the {branch} branch.\n"
-            "This build may contain bugs. We recommend using the stable release."
+            f"This build may contain bugs. We recommend using [Latest](https://github.com/{REPOSITORY}/releases/latest)."
         )
         self.assertEqual(state["releases"][0]["body"].rstrip("\n"), expected)
         offset = len(state["calls"])

@@ -17,8 +17,9 @@ version=${MOTIONPAPER_VERSION:?MOTIONPAPER_VERSION is required}
 }
 
 default_branch=${DEFAULT_BRANCH:-}
-autobuild_body=$(printf '基于 %s 分支提交 `%s` 自动构建的版本。\n此版本可能存在 Bug，建议使用正式版。\n\nAutomatically built from commit `%s` on the %s branch.\nThis build may contain bugs. We recommend using the stable release.\n' \
-    "$default_branch" "${commit:0:7}" "${commit:0:7}" "$default_branch")
+latest_release_url="https://github.com/$repository/releases/latest"
+autobuild_body=$(printf '基于 %s 分支提交 `%s` 自动构建的版本。\n此版本可能存在 Bug，建议使用 [Latest](%s)。\n\nAutomatically built from commit `%s` on the %s branch.\nThis build may contain bugs. We recommend using [Latest](%s).\n' \
+    "$default_branch" "${commit:0:7}" "$latest_release_url" "${commit:0:7}" "$default_branch" "$latest_release_url")
 if [[ $channel == stable ]]; then
     tag="v$version"
     dmg_name="Motionpaper-$tag.dmg"
