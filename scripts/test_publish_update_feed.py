@@ -423,6 +423,18 @@ class UpdateFeedTests(unittest.TestCase):
         with self.assertRaisesRegex(feed.FeedError, "duplicate"):
             self.publish()
 
+    def test_stable_legacy_asset_must_match_standard_image(self):
+        stable = copy.deepcopy(self.stable)
+        legacy = copy.deepcopy(stable["assets"][0])
+        legacy["name"] = "Motionpaper-1.2.3-" + "b" * 12 + ".dmg"
+        legacy["browser_download_url"] = f"{BASE}/v1.2.3/{legacy['name']}"
+        stable["assets"].append(legacy)
+        result = feed.feed_entry(self.github, REPOSITORY, "stable", stable)
+        self.assertTrue(result["downloadURL"].endswith("Motionpaper-v1.2.3.dmg"))
+        legacy["digest"] = "sha256:" + "f" * 64
+        with self.assertRaisesRegex(feed.FeedError, "legacy DMG differs"):
+            feed.feed_entry(self.github, REPOSITORY, "stable", stable)
+
     def test_changed_release_or_advanced_branch_is_rejected(self):
         self.github.catalog[1]["assets"][0]["digest"] = "sha256:" + "b" * 64
         with self.assertRaisesRegex(feed.FeedError, "changed"):

@@ -24,6 +24,7 @@ autobuild_body=$(printf '基于 %s 分支提交 %s 自动构建的版本。\n此
 if [[ $channel == stable ]]; then
     tag="v$version"
     dmg_name="Motionpaper-$tag.dmg"
+    legacy_dmg_name="Motionpaper-$version-${commit:0:12}.dmg"
 else
     [[ -n $default_branch ]] || { echo "error: DEFAULT_BRANCH is required for Autobuild releases" >&2; exit 1; }
     tag=Autobuild
@@ -183,8 +184,8 @@ asset_metadata() {
 
 validate_stable_dmg_names() {
     local json_file=$1
-    if ! jq -e --arg expected "$dmg_name" \
-        '[.assets[]? | select((.name | type) == "string" and (.name | test("\\.dmg$"; "i")) and .name != $expected)] | length == 0' \
+    if ! jq -e --arg expected "$dmg_name" --arg legacy "$legacy_dmg_name" \
+        '[.assets[]? | select((.name | type) == "string" and (.name | test("\\.dmg$"; "i")) and .name != $expected and .name != $legacy)] | length == 0' \
         "$json_file" >/dev/null; then
         echo "error: stable release $tag contains a non-standard DMG" >&2
         return 1
@@ -244,6 +245,32 @@ validate_dmg_contents() {
     [[ $(asset_metadata "$json_file" "$dmg_name" size) == "$expected_size" &&
        $(asset_metadata "$json_file" "$dmg_name" digest) == "$expected_digest" ]] || {
         echo "error: release asset $dmg_name size or SHA-256 does not match its bytes" >&2; return 1;
+    }
+}
+
+ensure_legacy_dmg() {
+    local json_file=$1 count legacy_url expected_size expected_digest
+    [[ $(jq -r '.target_commitish // empty' "$json_file") == "$commit" ]] || {
+        echo "error: stable release target_commitish must equal $commit for older clients" >&2; return 1;
+    }
+    validate_asset_metadata "$json_file" "$dmg_name" "$download_url"
+    expected_size=$(asset_metadata "$json_file" "$dmg_name" size)
+    expected_digest=$(asset_metadata "$json_file" "$dmg_name" digest)
+    legacy_url="https://github.com/$repository/releases/download/$tag/$legacy_dmg_name"
+    count=$(asset_count "$json_file" "$legacy_dmg_name")
+    if [[ $count == 0 ]]; then
+        mkdir -p "$work_dir/legacy-source"
+        gh release download "$tag" --repo "$repository" --pattern "$dmg_name" --dir "$work_dir/legacy-source" --clobber
+        validate_dmg_contents "$json_file" "$(file_size "$work_dir/legacy-source/$dmg_name")" "sha256:$(file_sha256 "$work_dir/legacy-source/$dmg_name")"
+        cp "$work_dir/legacy-source/$dmg_name" "$work_dir/$legacy_dmg_name"
+        gh release upload "$tag" "$work_dir/$legacy_dmg_name" --repo "$repository"
+        gh api "repos/$repository/releases/$release_id" >"$work_dir/legacy-uploaded.json"
+        cp "$work_dir/legacy-uploaded.json" "$json_file"
+    fi
+    validate_asset_metadata "$json_file" "$legacy_dmg_name" "$legacy_url"
+    [[ $(asset_metadata "$json_file" "$legacy_dmg_name" size) == "$expected_size" &&
+       $(asset_metadata "$json_file" "$legacy_dmg_name" digest) == "$expected_digest" ]] || {
+        echo "error: legacy DMG differs from the standard DMG" >&2; return 1;
     }
 }
 
@@ -326,6 +353,7 @@ reuse=false
 if [[ $release_is_draft == false ]]; then
     if [[ $channel == stable || $tag_commit == "$commit" ]]; then
         validate_published_release "$release_file"
+        if [[ $channel == stable ]]; then ensure_legacy_dmg "$release_file"; fi
         if [[ $channel == autobuild && $(jq -r '.body // empty' "$release_file") != "$autobuild_body" ]]; then
             skip_if_branch_advanced
             printf '%s\n' "$autobuild_body" >"$work_dir/release-body.md"
@@ -366,6 +394,7 @@ if [[ $reuse == false ]]; then
     if [[ $channel == stable ]]; then validate_stable_dmg_names "$work_dir/uploaded.json"; fi
     validate_asset_metadata "$work_dir/uploaded.json" "$dmg_name" "$download_url"
     validate_dmg_contents "$work_dir/uploaded.json" "$verified_dmg_size" "$verified_dmg_digest"
+    if [[ $channel == stable ]]; then ensure_legacy_dmg "$work_dir/uploaded.json"; fi
 
     if [[ $channel == autobuild ]]; then
         skip_if_branch_advanced

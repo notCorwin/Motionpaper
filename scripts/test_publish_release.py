@@ -543,10 +543,25 @@ class PublishReleaseTests(unittest.TestCase):
         for item in state["releases"][0]["assets"]:
             self.assertEqual(item["browser_download_url"], f"{BASE}/v1.2.3/{item['name']}")
         self.assertEqual({item["name"] for item in state["releases"][0]["assets"]},
-                         {"Motionpaper-v1.2.3.dmg", "notes.txt", "update.json"})
+                         {"Motionpaper-v1.2.3.dmg", f"Motionpaper-1.2.3-{commit[:12]}.dmg", "notes.txt", "update.json"})
         self.assertTrue(any(call[:2] == ["release", "download"] for call in state["calls"]))
-        self.assertEqual(len(uploads(state["calls"])), 1)
+        self.assertEqual(len(uploads(state["calls"])), 2)
         self.assertFalse(deletions(state["calls"]))
+
+    def test_stable_legacy_asset_matches_standard_and_mismatch_is_rejected(self):
+        commit = "a" * 40
+        state = state_for(commit)
+        state["tags"]["v1.2.3"] = {"type": "commit", "sha": commit}
+        result, state = self.publish(state, commit, "stable", "1.2.3")
+        self.assert_success(result)
+        release = state["releases"][0]
+        standard = next(a for a in release["assets"] if a["name"] == "Motionpaper-v1.2.3.dmg")
+        legacy = next(a for a in release["assets"] if a["name"] == f"Motionpaper-1.2.3-{commit[:12]}.dmg")
+        self.assertEqual((legacy["size"], legacy["digest"]), (standard["size"], standard["digest"]))
+        legacy["digest"] = "sha256:" + "f" * 64
+        result, state = self.publish(state, commit, "stable", "1.2.3")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("legacy DMG differs", result.stderr)
 
     def test_stable_draft_manifest_failure_does_not_publish_and_can_resume(self):
         commit = "a" * 40
@@ -566,7 +581,7 @@ class PublishReleaseTests(unittest.TestCase):
                 self.assertFalse(uploads(state["calls"][offset:], "Motionpaper-v1.2.3.dmg"))
                 if when == "after": self.assertFalse(uploads(state["calls"][offset:], "update.json"))
 
-    def test_stable_annotated_tag_commit_overrides_release_target_commitish(self):
+    def test_stable_rejects_mismatched_target_commitish_for_legacy_clients(self):
         commit, tag_object = "a" * 40, "c" * 40
         state = state_for(commit)
         draft = released("stable", commit, version="1.2.3", draft=True)
@@ -575,9 +590,9 @@ class PublishReleaseTests(unittest.TestCase):
         state["tags"]["v1.2.3"] = {"type": "tag", "sha": tag_object}
         state["tag_objects"] = {tag_object: {"type": "commit", "sha": commit}}
         result, state = self.publish(state, commit, "stable", "1.2.3")
-        self.assert_success(result)
-        self.assertEqual(state["releases"][0]["target_commitish"], "b" * 40)
-        self.assertEqual(read_feed(state, "v1.2.3")["stable"]["commit"], commit)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("target_commitish", result.stderr)
+        self.assertTrue(state["releases"][0]["draft"])
 
     def test_tampered_existing_draft_dmg_is_not_published(self):
         commit = "a" * 40
@@ -655,8 +670,8 @@ class PublishReleaseTests(unittest.TestCase):
                          {key: value for key, value in before.items() if key != "assets"})
         self.assertEqual(after["assets"][:2], before["assets"][:2])
         self.assertEqual(set(read_feed(state, "v1.2.3")), {"stable"})
-        self.assertEqual(len(uploads(state["calls"])), 1)
-        self.assertEqual(Path(uploads(state["calls"])[0][3]).name, "update.json")
+        self.assertEqual(len(uploads(state["calls"])), 2)
+        self.assertEqual(Path(uploads(state["calls"])[-1][3]).name, "update.json")
         offset = len(state["calls"])
         result, state = self.publish(state, commit, "stable", "1.2.3", content=b"another build")
         self.assert_success(result)

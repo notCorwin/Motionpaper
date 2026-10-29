@@ -182,10 +182,16 @@ def feed_entry(github, repository, channel, release):
         raise FeedError(f"release {tag} has invalid assets")
     dmgs = [asset for asset in assets if isinstance(asset.get("name"), str) and asset["name"].lower().endswith(".dmg")]
     matches = [asset for asset in dmgs if asset["name"] == name]
-    if len(matches) != 1 or (channel == "stable" and len(dmgs) != 1):
+    legacy_name = f"Motionpaper-{tag[1:]}-{commit[:12]}.dmg" if channel == "stable" else None
+    legacy = [asset for asset in dmgs if asset["name"] == legacy_name]
+    if len(matches) != 1 or (channel == "stable" and (len(legacy) > 1 or len(dmgs) != 1 + len(legacy))):
         raise FeedError(f"release {tag} has an invalid DMG set")
     dmg = matches[0]
     validate_asset(dmg, repository, tag, draft, name)
+    if legacy:
+        validate_asset(legacy[0], repository, tag, draft, legacy_name)
+        if legacy[0]["size"] != dmg["size"] or legacy[0]["digest"] != dmg["digest"]:
+            raise FeedError(f"release {tag} legacy DMG differs from the standard DMG")
     entry = {
         "commit": commit,
         "publishedAt": published_time(dmg.get("created_at"), tag),
